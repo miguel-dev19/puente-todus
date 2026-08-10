@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Puente ToDus - Estadísticas</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script>
+        async function cargarStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                
+                document.getElementById('uptime').textContent = data.uptime;
+                document.getElementById('total').textContent = data.total;
+                document.getElementById('textos').textContent = data.mensajes_texto;
+                document.getElementById('imagenes').textContent = data.imagenes;
+                document.getElementById('videos').textContent = data.videos;
+                document.getElementById('ultimo').textContent = data.ultimo_mensaje || 'Ninguno';
+                document.getElementById('error').textContent = data.ultimo_error || 'Ninguno';
+                document.getElementById('todus').textContent = data.conectado_todus ? '✅ Conectado' : '❌ Desconectado';
+                document.getElementById('todus').className = data.conectado_todus ? 'ok' : 'fail';
+                document.getElementById('telegram').textContent = data.conectado_telegram ? '✅ Conectado' : '❌ Desconectado';
+                document.getElementById('telegram').className = data.conectado_telegram ? 'ok' : 'fail';
+                document.getElementById('ts').textContent = data.timestamp;
+            } catch(e) {
+                console.error(e);
+            }
+        }
+        setInterval(cargarStats, 3000);
+        window.onload = cargarStats;
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 Puente Telegram → ToDus</h1>
+        <div class="status">
+            <div class="card">
+                <h3>⏱️ Uptime</h3>
+                <p id="uptime">Cargando...</p>
+            </div>
+            <div class="card">
+                <h3>📊 Total Mensajes</h3>
+                <p id="total">0</p>
+            </div>
+        </div>
+        
+        <h2>📈 Estadísticas</h2>
+        <div class="stats-grid">
+            <div class="stat">
+                <span>📩 Textos</span>
+                <strong id="textos">0</strong>
+            </div>
+            <div class="stat">
+                <span>📷 Imágenes</span>
+                <strong id="imagenes">0</strong>
+            </div>
+            <div class="stat">
+                <span>🎬 Videos</span>
+                <strong id="videos">0</strong>
+            </div>
+        </div>
+        
+        <h2>🔌 Conexiones</h2>
+        <div class="connections">
+            <p><span>ToDus:</span> <span id="todus" class="ok">Cargando...</span></p>
+            <p><span>Telegram:</span> <span id="telegram" class="ok">Cargando...</span></p>
+        </div>
+        
+        <h2>📝 Última actividad</h2>
+        <div class="info">
+            <p><strong>Último mensaje:</strong> <span id="ultimo">-</span></p>
+            <p><strong>Último error:</strong> <span id="error">-</span></p>
+            <p class="ts">Actualizado: <span id="ts">-</span></p>
+        </div>
+    </div>
+</body>
+</html>

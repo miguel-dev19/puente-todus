@@ -1,0 +1,20 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', sans-serif; background: #0f0f1a; color: #e0e0e0; min-height: 100vh; }
+.container { max-width: 600px; margin: 0 auto; padding: 20px; }
+h1 { text-align: center; color: #7c4dff; margin-bottom: 20px; font-size: 1.5em; }
+h2 { color: #b388ff; margin: 20px 0 10px; font-size: 1.1em; }
+.status { display: flex; gap: 10px; }
+.card { flex: 1; background: #1a1a2e; padding: 15px; border-radius: 10px; text-align: center; }
+.card h3 { color: #999; font-size: 0.9em; margin-bottom: 5px; }
+.card p { font-size: 1.5em; font-weight: bold; color: #7c4dff; }
+.stats-grid { display: flex; gap: 10px; }
+.stat { flex: 1; background: #1a1a2e; padding: 15px; border-radius: 10px; text-align: center; }
+.stat span { display: block; color: #999; font-size: 0.8em; margin-bottom: 5px; }
+.stat strong { font-size: 1.3em; color: #fff; }
+.connections { background: #1a1a2e; padding: 15px; border-radius: 10px; }
+.connections p { margin: 5px 0; display: flex; justify-content: space-between; }
+.ok { color: #4caf50 !important; }
+.fail { color: #f44336 !important; }
+.info { background: #1a1a2e; padding: 15px; border-radius: 10px; }
+.info p { margin: 5px 0; word-break: break-all; }
+.ts { color: #666; font-size: 0.8em; margin-top: 10px; }

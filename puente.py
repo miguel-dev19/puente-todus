@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Puente Telegram → ToDus con estadísticas web"""
+import socket, ssl, re, base64, uuid, time, asyncio, os, requests, subprocess
+from telethon import TelegramClient, events
+from PIL import Image
+import blurhash
+
+# Importar stats del servidor web
+from app import stats, actualizar_estadisticas
+
+# ─── CONFIGURACIÓN ───
+API_ID = int(os.getenv("API_ID", "32471788"))
+API_HASH = os.getenv("API_HASH", "cb57130abda56877acf3b3027e569450")
+CANAL_ID = int(os.getenv("CANAL_ID", "-1001158018148"))
+SESSION_FILE = "userbot.session"
+
+TODUS_PHONE = os.getenv("TODUS_PHONE", "5351430352")
+TODUS_SECRET = os.getenv("TODUS_SECRET", "1234567890abcdef1234567890abcdef")
+GRUPO_TODUS = os.getenv("GRUPO_TODUS", "duploxxxgayporn@muclight.im.todus.cu")
+
+# ─── CONEXIÓN TODUS ───
+def conectar_todus():
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    s = socket.socket(); s.settimeout(10); s.connect(('auth.todus.cu', 443))
+    ss = ctx.wrap_socket(s, server_hostname='auth.todus.cu')
+    body = bytes([0x0a, len(TODUS_PHONE)]) + TODUS_PHONE.encode() + bytes([0x12, 32]) + TODUS_SECRET.encode()[:32]
+    req = f"POST /v2/auth/token HTTP/1.1\r\nHost: auth.todus.cu\r\nContent-Type: application/x-protobuf\r\nUser-Agent: ToDus 2.1.2 Auth\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
+    ss.send(req)
+    resp = b''
+    while True:
+        try:
+            c = ss.recv(4096)
+            if not c: break
+            resp += c
+        except: break
+    ss.close()
+    jwt = re.search(rb'eyJ[\w.\-]+', resp).group(0).decode()
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    sock = socket.socket(); sock.settimeout(15); sock.connect(('ws.todus.cu', 1756))
+    sock = ctx.wrap_socket(sock, server_hostname='ws.todus.cu')
+    def S(x): sock.send(x.encode())
+    def R(t=5):
+        d=b''; sock.settimeout(t)
+        for _ in range(50):
+            try:
+                c=sock.recv(4096)
+                if not c: break
+                d+=c
+                if b'</iq>' in d or b'<success' in d or b'<ok' in d: break
+            except: break
+        return d.decode(errors='ignore')
+    S('<?xml version="1.0"?><stream:stream to="im.todus.cu" xmlns="jc" xmlns:stream="x1" version="1.0">'); R()
+    S(f'<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">{base64.b64encode(f"\x00{TODUS_PHONE}\x00{jwt}".encode()).decode()}</auth>'); R()
+    S('<?xml version="1.0"?><stream:stream to="im.todus.cu" xmlns="jc" xmlns:stream="x1" version="1.0">'); R()
+    S(f'<iq type="set" id="b"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><resource>puente</resource></bind></iq>'); R()
+    S(f'<iq type="set" id="s"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>'); R()
+    S('<presence/>'); time.sleep(0.3)
+    return sock, S
+
+def calcular_blurhash(filepath):
+    try:
+        img = Image.open(filepath)
+        img.thumbnail((32, 32))
+        pixels = list(img.convert('RGB').getdata())
+        w, h = img.size
+        return blurhash.encode(pixels, w, h, 4, 4)
+    except:
+        return ""
+
+def subir_a_s3(filepath, filename):
+    remote = f"puente_{uuid.uuid4().hex[:8]}_{filename}"
+    url = f"https://s3.todus.cu/stream/{remote}"
+    with open(filepath, 'rb') as f:
+        r = requests.put(url, data=f.read(), timeout=120)
+    return url if r.status_code == 200 else None
+
+def get_video_info(filepath):
+    try:
+        r1 = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', filepath],
+             capture_output=True, text=True, timeout=10)
+        r2 = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', filepath],
+             capture_output=True, text=True, timeout=10)
+        d = int(float(r1.stdout.strip()))
+        w, h = map(int, r2.stdout.strip().split('x'))
+        return d, w, h
+    except:
+        return 0, 720, 1280
+
+def extract_thumbnail(filepath):
+    thumb = f"thumb_{uuid.uuid4().hex[:8]}.jpg"
+    try:
+        subprocess.run(['ffmpeg', '-y', '-i', filepath, '-vframes', '1', '-q:v', '5', thumb],
+             capture_output=True, timeout=15)
+        if os.path.exists(thumb):
+            url = subir_a_s3(thumb, thumb)
+            os.remove(thumb)
+            return url or ""
+    except: pass
+    return ""
+
+def enviar_texto(sock, S, texto):
+    if not texto.strip(): return
+    msg_id = uuid.uuid4().hex[:16]
+    texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{msg_id}" xmlns="jc"><k xmlns="x8"/><b>{texto}</b></m>')
+    time.sleep(0.2)
+
+def enviar_imagen(sock, S, filepath, texto=""):
+    fn = os.path.basename(filepath)
+    size = os.path.getsize(filepath)
+    img = Image.open(filepath)
+    w, h = img.size
+    tnail = calcular_blurhash(filepath)
+    url = subir_a_s3(filepath, fn)
+    if not url: return enviar_texto(sock, S, texto or "📷 Imagen")
+    mid = uuid.uuid4().hex[:16]
+    fid = uuid.uuid4().hex[:16]
+    cap = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if texto else fn
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><image xmlns="image:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" w="{w}" he="{h}" tnail="{tnail}"/><b>📷 {cap}</b></m>')
+    time.sleep(0.2)
+
+def enviar_video(sock, S, filepath, texto=""):
+    fn = os.path.basename(filepath)
+    size = os.path.getsize(filepath)
+    d, w, h = get_video_info(filepath)
+    tnail_url = extract_thumbnail(filepath)
+    url = subir_a_s3(filepath, fn)
+    if not url: return enviar_texto(sock, S, texto or "🎬 Video")
+    mid = uuid.uuid4().hex[:16]
+    fid = uuid.uuid4().hex[:16]
+    cap = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if texto else fn
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><video xmlns="video:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" d="{d}" w="{w}" he="{h}" tnail="{tnail_url}"/><b>🎬 {cap}</b></m>')
+    time.sleep(0.2)
+
+# ─── USERBOT ───
+client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+
+@client.on(events.NewMessage(chats=CANAL_ID))
+async def handler(event):
+    texto = event.message.text or ""
+    try:
+        if event.message.photo:
+            filepath = await event.message.download_media(file="temp_img.jpg")
+            if filepath:
+                enviar_imagen(sock, S, filepath, texto)
+                os.remove(filepath)
+                actualizar_estadisticas("imagen", texto)
+        elif event.message.video:
+            filepath = await event.message.download_media(file="temp_vid.mp4")
+            if filepath:
+                enviar_video(sock, S, filepath, texto)
+                os.remove(filepath)
+                actualizar_estadisticas("video", texto)
+        elif texto.strip():
+            enviar_texto(sock, S, texto)
+            actualizar_estadisticas("texto", texto)
+    except Exception as e:
+        actualizar_estadisticas("error", error=str(e))
+
+async def main():
+    global sock, S
+    print("🔌 Conectando a ToDus...")
+    sock, S = conectar_todus()
+    stats["conectado_todus"] = True
+    print("✅ ToDus conectado")
+    print("🔌 Iniciando userbot...")
+    await client.start()
+    stats["conectado_telegram"] = True
+    print(f"✅ Escuchando canal ID {CANAL_ID}\n")
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Detenido")
+    finally:
+        try:
+            sock.send(b'</stream:stream>')
+            sock.close()
+        except: pass
