@@ -140,3 +140,21 @@ if __name__ == "__main__":
     finally:
         try: sock.send(b'</stream:stream>'); sock.close()
         except: pass
+
+# ─── KEEPALIVE (evitar suspensión en plan free) ───
+import threading
+import requests as req_keep
+
+def keepalive():
+    """Hace ping a la URL pública cada 5 minutos"""
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://puente-todus.onrender.com")
+    while True:
+        time.sleep(300)  # 5 minutos
+        try:
+            r = req_keep.get(f"{url}/api/stats", timeout=10)
+            print(f"Keepalive: {r.status_code}")
+        except Exception as e:
+            print(f"Keepalive error: {e}")
+
+# Iniciar keepalive en segundo plano
+threading.Thread(target=keepalive, daemon=True).start()
