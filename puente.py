@@ -5,7 +5,6 @@ from telethon import TelegramClient, events
 from PIL import Image
 import blurhash
 
-# Importar stats del servidor web
 from app import stats, actualizar_estadisticas
 
 # ─── CONFIGURACIÓN ───
@@ -35,9 +34,11 @@ def conectar_todus():
         except: break
     ss.close()
     jwt = re.search(rb'eyJ[\w.\-]+', resp).group(0).decode()
+    
     ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
     sock = socket.socket(); sock.settimeout(15); sock.connect(('ws.todus.cu', 1756))
     sock = ctx.wrap_socket(sock, server_hostname='ws.todus.cu')
+    
     def S(x): sock.send(x.encode())
     def R(t=5):
         d=b''; sock.settimeout(t)
@@ -49,8 +50,14 @@ def conectar_todus():
                 if b'</iq>' in d or b'<success' in d or b'<ok' in d: break
             except: break
         return d.decode(errors='ignore')
+    
     S('<?xml version="1.0"?><stream:stream to="im.todus.cu" xmlns="jc" xmlns:stream="x1" version="1.0">'); R()
-    S(f'<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">{base64.b64encode(f"\x00{TODUS_PHONE}\x00{jwt}".encode()).decode()}</auth>'); R()
+    
+    # Corregido: evitar backslash en f-string
+    auth_str = "\x00" + TODUS_PHONE + "\x00" + jwt
+    auth_b64 = base64.b64encode(auth_str.encode()).decode()
+    S(f'<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">{auth_b64}</auth>'); R()
+    
     S('<?xml version="1.0"?><stream:stream to="im.todus.cu" xmlns="jc" xmlns:stream="x1" version="1.0">'); R()
     S(f'<iq type="set" id="b"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><resource>puente</resource></bind></iq>'); R()
     S(f'<iq type="set" id="s"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>'); R()
@@ -100,11 +107,13 @@ def extract_thumbnail(filepath):
     except: pass
     return ""
 
+def escapar(texto):
+    return texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
 def enviar_texto(sock, S, texto):
     if not texto.strip(): return
     msg_id = uuid.uuid4().hex[:16]
-    texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{msg_id}" xmlns="jc"><k xmlns="x8"/><b>{texto}</b></m>')
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{msg_id}" xmlns="jc"><k xmlns="x8"/><b>{escapar(texto)}</b></m>')
     time.sleep(0.2)
 
 def enviar_imagen(sock, S, filepath, texto=""):
@@ -114,11 +123,11 @@ def enviar_imagen(sock, S, filepath, texto=""):
     w, h = img.size
     tnail = calcular_blurhash(filepath)
     url = subir_a_s3(filepath, fn)
-    if not url: return enviar_texto(sock, S, texto or "📷 Imagen")
+    if not url: return enviar_texto(sock, S, texto or "Imagen")
     mid = uuid.uuid4().hex[:16]
     fid = uuid.uuid4().hex[:16]
-    cap = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if texto else fn
-    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><image xmlns="image:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" w="{w}" he="{h}" tnail="{tnail}"/><b>📷 {cap}</b></m>')
+    cap = escapar(texto) if texto else fn
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><image xmlns="image:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" w="{w}" he="{h}" tnail="{tnail}"/><b>{cap}</b></m>')
     time.sleep(0.2)
 
 def enviar_video(sock, S, filepath, texto=""):
@@ -127,11 +136,11 @@ def enviar_video(sock, S, filepath, texto=""):
     d, w, h = get_video_info(filepath)
     tnail_url = extract_thumbnail(filepath)
     url = subir_a_s3(filepath, fn)
-    if not url: return enviar_texto(sock, S, texto or "🎬 Video")
+    if not url: return enviar_texto(sock, S, texto or "Video")
     mid = uuid.uuid4().hex[:16]
     fid = uuid.uuid4().hex[:16]
-    cap = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if texto else fn
-    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><video xmlns="video:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" d="{d}" w="{w}" he="{h}" tnail="{tnail_url}"/><b>🎬 {cap}</b></m>')
+    cap = escapar(texto) if texto else fn
+    S(f'<m to="{GRUPO_TODUS}" t="gc" i="{mid}" xmlns="jc"><k xmlns="x8"/><video xmlns="video:n" i="{fid}" mi="{mid}" url="{url}" n="{fn}" s="{size}" h="" d="{d}" w="{w}" he="{h}" tnail="{tnail_url}"/><b>{cap}</b></m>')
     time.sleep(0.2)
 
 # ─── USERBOT ───
@@ -161,21 +170,21 @@ async def handler(event):
 
 async def main():
     global sock, S
-    print("🔌 Conectando a ToDus...")
+    print("Conectando a ToDus...")
     sock, S = conectar_todus()
     stats["conectado_todus"] = True
-    print("✅ ToDus conectado")
-    print("🔌 Iniciando userbot...")
+    print("ToDus conectado")
+    print("Iniciando userbot...")
     await client.start()
     stats["conectado_telegram"] = True
-    print(f"✅ Escuchando canal ID {CANAL_ID}\n")
+    print(f"Escuchando canal ID {CANAL_ID}")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Detenido")
+        print("Detenido")
     finally:
         try:
             sock.send(b'</stream:stream>')

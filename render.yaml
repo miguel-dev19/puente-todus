@@ -5,9 +5,9 @@ services:
     plan: free
     envVars:
       - key: API_ID
-        value: 32471788
+        value: "32471788"
       - key: API_HASH
-        value: cb57130abda56877acf3b3027e569450
+        value: "cb57130abda56877acf3b3027e569450"
       - key: CANAL_ID
         value: "-1001158018148"
       - key: TODUS_PHONE
