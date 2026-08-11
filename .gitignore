@@ -1,0 +1,8 @@
+__pycache__/
+render/
+*.pyc
+*.jpg
+*.mp4
+*.webp
+*.png
+temp_*
