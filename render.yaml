@@ -3,16 +3,3 @@ services:
     name: puente-todus
     env: docker
     plan: free
-    envVars:
-      - key: API_ID
-        value: "32471788"
-      - key: API_HASH
-        value: "cb57130abda56877acf3b3027e569450"
-      - key: CANAL_ID
-        value: "-1001158018148"
-      - key: TODUS_PHONE
-        value: "5351430352"
-      - key: TODUS_SECRET
-        value: "1234567890abcdef1234567890abcdef"
-      - key: GRUPO_TODUS
-        value: "duploxxxgayporn@muclight.im.todus.cu"
