@@ -21,25 +21,22 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def get_filename(event):
+def get_filename_and_size(event):
     msg = event.message
-    if msg.file and msg.file.name:
-        return msg.file.name
-    if msg.photo:
-        return f"photo_{msg.photo.id}.jpg"
     if msg.video:
-        return f"video_{msg.video.id}.mp4"
-    if msg.audio:
-        return f"audio_{msg.audio.id}.mp3"
+        return f"video_{msg.video.id}.mp4", msg.video.size
+    if msg.photo:
+        return f"photo_{msg.photo.id}.jpg", msg.photo.sizes[-1].size if msg.photo.sizes else 0
+    if msg.file and msg.file.name:
+        return msg.file.name, msg.file.size
     if msg.document:
-        return f"document_{uuid.uuid4().hex[:6]}"
-    return f"file_{uuid.uuid4().hex[:6]}.bin"
+        return f"document_{uuid.uuid4().hex[:6]}", msg.document.size
+    return f"file_{uuid.uuid4().hex[:6]}.bin", 0
 
 async def upload_async(event, filepath, filename, size):
     msg = await event.reply("DOWNLOADING...")
     ext = os.path.splitext(filename)[1] or ".bin"
 
-    # Pequeña pausa para que se vea DOWNLOADING
     await asyncio.sleep(1)
     await msg.edit("UPLOADING...")
 
@@ -81,14 +78,17 @@ async def handler(event):
     msg = event.message
 
     if msg.media:
-        filename = get_filename(event)
+        filename, original_size = get_filename_and_size(event)
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
         try:
+            # Descargar con el tamaño real del documento
             filepath = await msg.download_media(file=temp_path)
             if filepath:
-                size = os.path.getsize(filepath)
-                asyncio.create_task(upload_async(event, filepath, filename, size))
+                actual_size = os.path.getsize(filepath)
+                print(f"Original: {original_size} | Actual: {actual_size}")
+                # Usar el tamaño real del archivo descargado
+                asyncio.create_task(upload_async(event, filepath, filename, actual_size))
         except Exception as e:
             await event.reply(f"ERROR: {str(e)[:100]}")
     elif texto == '/start':
