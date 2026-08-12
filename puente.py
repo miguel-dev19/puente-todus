@@ -13,10 +13,6 @@ os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
 stats = {"start_time": time.time(), "archivos_subidos": 0, "total_bytes": 0, "ultimo_archivo": None}
 
-def progress_bar(pct, w=15):
-    f = int(w * pct / 100)
-    return f"{'⬢' * f}{'⬡' * (w - f)}"
-
 def format_size(b):
     if b < 1024: return f"{b} B"
     elif b < 1024*1024: return f"{b/1024:.1f} KB"
@@ -47,40 +43,21 @@ def get_filename(event):
     return f"file_{uuid.uuid4().hex[:6]}.bin"
 
 async def upload_async(event, filepath, filename, size):
-    # UN SOLO MENSAJE que se va editando
     msg = await event.reply("PROCESSING...")
     ext = os.path.splitext(filename)[1] or ".bin"
 
     remote = f"{uuid.uuid4().hex[:8]}_{filename}"
     url = f"{S3}/{remote}"
-    uploaded = 0
-    last_pct = -15
-    start_time = time.time()
 
+    # Subir SIN generador - directo
     def subir():
-        """Sube y actualiza progreso usando callback al loop principal"""
-        nonlocal uploaded, last_pct
-        with open(filepath, 'rb') as f:
-            headers = {"Content-Length": str(size)}
-            # Subir en chunks para actualizar progreso
-            def gen():
-                nonlocal uploaded, last_pct
-                while True:
-                    chunk = f.read(2048 * 1024)
-                    if not chunk: break
-                    uploaded += len(chunk)
-                    pct = int((uploaded / size) * 100)
-                    if pct - last_pct >= 15 or pct == 100:
-                        last_pct = pct
-                        asyncio.create_task(msg.edit(
-                            f"┎ UPLOADING\n"
-                            f"┠ [{progress_bar(pct)}]\n"
-                            f"┠ PERCENTAGE: {pct}%\n"
-                            f"┖ SIZE: {format_size(uploaded)}/{format_size(size)}"
-                        ))
-                    yield chunk
-
-            return requests.put(url, data=gen(), headers=headers, timeout=300)
+        try:
+            with open(filepath, 'rb') as f:
+                headers = {"Content-Length": str(size)}
+                return requests.put(url, data=f, headers=headers, timeout=300)
+        except Exception as e:
+            print(f"Upload error: {e}")
+            return None
 
     result = await bot.loop.run_in_executor(None, subir)
 
@@ -96,7 +73,8 @@ async def upload_async(event, filepath, filename, size):
             f"┖ URL: {url}"
         )
     else:
-        await msg.edit(f"ERROR: HTTP {result.status_code if result else 'failed'}")
+        status = result.status_code if result else "failed"
+        await msg.edit(f"ERROR: HTTP {status}")
 
     try: os.remove(filepath)
     except: pass
@@ -105,7 +83,7 @@ async def upload_async(event, filepath, filename, size):
 async def handler(event):
     texto = event.message.text or ""
 
-    if event.message.file or event.message.document:
+    if event.message.file or event.message.document or event.message.photo:
         filename = get_filename(event)
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
