@@ -1,11 +1,10 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, jsonify
 import time
-
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return render_template('stats.html')
+    return jsonify({"status": "online"})
 
 @app.route('/api/stats')
 def api_stats():
@@ -17,12 +16,7 @@ def api_stats():
             "uptime": f"{h}h {m}m {s}s",
             "archivos": stats["archivos_subidos"],
             "total_bytes": stats["total_bytes"],
-            "ultimo": stats["ultimo_archivo"],
-            "error": stats["ultimo_error"],
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "ultimo": stats["ultimo_archivo"]
         })
     except:
-        return jsonify({"error": "Stats no disponibles"})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+        return jsonify({"error": "Stats not available"})

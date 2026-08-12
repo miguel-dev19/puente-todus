@@ -1,122 +1,119 @@
 #!/usr/bin/env python3
-"""Bot Telegram: sube archivos a S3 ToDus con progreso"""
+"""Bot Telegram: @s3tdupload_bot - uploader to S3 ToDus"""
 import os, uuid, asyncio, requests, time, threading
 from telethon import TelegramClient, events
 
 API_ID = 32471788
 API_HASH = "cb57130abda56877acf3b3027e569450"
-BOT_TOKEN = "8144541638:AAGZq6FDeyvb5qWXiKBW4W-f0KL0fX68CyA"
+BOT_TOKEN = "8864221542:AAHAJ_cb_Y1BmotZrx8GzaFKELfLsK3sJDQ"
 SESSION_FILE = "bot.session"
 S3 = "https://s3.todus.cu/stream"
+DOWNLOAD_PATH = "/tmp/todus_uploads"
+os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
-stats = {
-    "start_time": time.time(), "archivos_subidos": 0,
-    "total_bytes": 0, "ultimo_archivo": None, "ultimo_error": None
-}
+stats = {"start_time": time.time(), "archivos_subidos": 0, "total_bytes": 0, "ultimo_archivo": None}
+user_locks = {}
+user_locks_lock = threading.Lock()
 
-def progress_bar(percent, width=15):
-    filled = int(width * percent / 100)
-    return f"{'⬢' * filled}{'⬡' * (width - filled)}"
+def get_user_lock(uid):
+    with user_locks_lock:
+        if uid not in user_locks: user_locks[uid] = threading.Lock()
+        return user_locks[uid]
+
+def progress_bar(pct, w=15):
+    f = int(w * pct / 100)
+    return f"{'⬢' * f}{'⬡' * (w - f)}"
 
 def format_size(b):
-    if b < 1024*1024: return f"{b/1024:.1f} KB"
+    if b < 1024: return f"{b} B"
+    elif b < 1024*1024: return f"{b/1024:.1f} KB"
     elif b < 1024*1024*1024: return f"{b/(1024*1024):.1f} MB"
     return f"{b/(1024*1024*1024):.1f} GB"
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-async def subir_archivo(event, filepath, filename, size):
-    msg = await event.reply("Iniciando...")
+def upload_worker(event, filepath, filename, size, user_id):
+    lock = get_user_lock(user_id)
+    with lock:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def _upload():
+            msg = await event.reply("PROCESSING...")
+            ext = os.path.splitext(filename)[1] or ".bin"
 
-    await asyncio.sleep(0.5)
-    await msg.edit(
-        f"┎ DOWNLOADING\n"
-        f"┠ [{progress_bar(100)}]\n"
-        f"┠ PERCENTAGE: 100.00%\n"
-        f"┖ PROCESSED: {format_size(size)}/{format_size(size)}"
-    )
-
-    await asyncio.sleep(0.3)
-    await msg.edit(
-        f"┎ UPLOADING\n"
-        f"┠ [{progress_bar(0)}]\n"
-        f"┠ PERCENTAGE: 0.00%\n"
-        f"┖ PROCESSED: 0 B/{format_size(size)}"
-    )
-
-    remote = f"up_{uuid.uuid4().hex[:8]}_{filename}"
-    url = f"{S3}/{remote}"
-    uploaded = 0
-    last_pct = -1
-
-    def gen():
-        nonlocal uploaded, last_pct
-        with open(filepath, 'rb') as f:
-            while True:
-                chunk = f.read(256 * 1024)
-                if not chunk: break
-                uploaded += len(chunk)
-                pct = int((uploaded / size) * 100)
-                if pct - last_pct >= 10:
-                    last_pct = pct
-                    bot.loop.create_task(msg.edit(
-                        f"┎ UPLOADING\n"
-                        f"┠ [{progress_bar(pct)}]\n"
-                        f"┠ PERCENTAGE: {pct:.2f}%\n"
-                        f"┖ PROCESSED: {format_size(uploaded)}/{format_size(size)}"
-                    ))
-                yield chunk
-
-    try:
-        r = requests.put(url, data=gen(), timeout=300)
-        if r.status_code == 200:
-            stats["archivos_subidos"] += 1
-            stats["total_bytes"] += size
-            stats["ultimo_archivo"] = filename
             await msg.edit(
-                f"📄 {filename}\n"
-                f"📏 {format_size(size)}\n"
-                f"🔗 {url}"
+                f"┎ UPLOADING\n"
+                f"┠ [{progress_bar(0)}]\n"
+                f"┠ PERCENTAGE: 0%\n"
+                f"┖ SIZE: 0 B/{format_size(size)}"
             )
-        else:
-            await msg.edit(f"❌ Error HTTP: {r.status_code}")
-    except Exception as e:
-        stats["ultimo_error"] = str(e)[:100]
-        await msg.edit(f"❌ Error: {str(e)[:200]}")
+
+            remote = f"{uuid.uuid4().hex[:8]}_{filename}"
+            url = f"{S3}/{remote}"
+
+            try:
+                with open(filepath, 'rb') as f:
+                    headers = {"Content-Length": str(size)}
+                    r = requests.put(url, data=f, headers=headers, timeout=300)
+                
+                if r.status_code == 200:
+                    stats["archivos_subidos"] += 1
+                    stats["total_bytes"] += size
+                    stats["ultimo_archivo"] = filename
+                    name_no_ext = os.path.splitext(filename)[0].replace('_', ' ')
+                    await msg.edit(
+                        f"┎ NAME: {name_no_ext}\n"
+                        f"┠ EXTENSION: {ext.replace('.', '')}\n"
+                        f"┠ SIZE: {format_size(size)}\n"
+                        f"┖ URL: {url}"
+                    )
+                else:
+                    await msg.edit(f"ERROR: HTTP {r.status_code}")
+            except Exception as e:
+                await msg.edit(f"ERROR: {str(e)[:200]}")
+            finally:
+                try: os.remove(filepath)
+                except: pass
+
+        loop.run_until_complete(_upload())
+        loop.close()
 
 @bot.on(events.NewMessage)
 async def handler(event):
+    user_id = event.sender_id
+    texto = event.message.text or ""
+
     if event.message.file:
-        await event.reply("📥 Recibido, procesando...")
-        filepath = await event.message.download_media(file="temp_upload")
+        await event.reply("PROCESSING...")
+        ext = os.path.splitext(event.message.file.name or "file")[1] or ".bin"
+        temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
+        filepath = await event.message.download_media(file=temp_path)
         if filepath:
-            filename = os.path.basename(filepath)
+            filename = event.message.file.name or f"file{ext}"
             size = os.path.getsize(filepath)
-            await subir_archivo(event, filepath, filename, size)
-            os.remove(filepath)
-    elif event.message.text == '/start':
-        await event.reply("📤 Envíame cualquier archivo y lo subiré al S3 de ToDus.\nTe daré el enlace de descarga con progreso en tiempo real.")
-    elif event.message.text == '/stats':
+            threading.Thread(target=upload_worker, args=(event, filepath, filename, size, user_id), daemon=True).start()
+    elif texto == '/start':
+        await event.reply("Send me any file and I'll upload it to ToDus S3.")
+    elif texto == '/stats':
         uptime = int(time.time() - stats["start_time"])
         h, m = divmod(uptime, 3600); m, s = divmod(m, 60)
         await event.reply(
-            f"📊 Estadísticas\n"
-            f"⏱️ Uptime: {h}h {m}m {s}s\n"
-            f"📤 Archivos: {stats['archivos_subidos']}\n"
-            f"📏 Total: {format_size(stats['total_bytes'])}\n"
-            f"📄 Último: {stats['ultimo_archivo'] or 'Ninguno'}"
+            f"UPTIME: {h}h {m}m {s}s\n"
+            f"FILES: {stats['archivos_subidos']}\n"
+            f"TOTAL: {format_size(stats['total_bytes'])}\n"
+            f"LAST: {stats['ultimo_archivo'] or 'None'}"
         )
 
 def ping_render():
     while True:
         time.sleep(300)
-        try:
-            requests.get("https://puente-todus.onrender.com/api/stats", timeout=10)
+        try: requests.get("https://puente-todus.onrender.com/api/stats", timeout=10)
         except: pass
 
 async def main():
     await bot.start(bot_token=BOT_TOKEN)
-    print("✅ @todbrd_bot listo")
+    print("BOT READY: @s3tdupload_bot")
     threading.Thread(target=ping_render, daemon=True).start()
     await bot.run_until_disconnected()
 
