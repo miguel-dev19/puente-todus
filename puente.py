@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Bot Telegram: @s3tdupload_bot - selector de calidad de video"""
-import os, uuid, asyncio, requests, time, threading, json
-from telethon import TelegramClient, events
-from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeFilename
+"""Bot Telegram: @s3tdupload_bot - uploader con selector de calidad"""
+import os, uuid, asyncio, requests, time, threading
+from telethon import TelegramClient, events, Button
 
 API_ID = 32471788
 API_HASH = "cb57130abda56877acf3b3027e569450"
@@ -13,7 +12,7 @@ DOWNLOAD_PATH = "/tmp/todus_uploads"
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
 stats = {"start_time": time.time(), "archivos_subidos": 0, "total_bytes": 0, "ultimo_archivo": None}
-pending_videos = {}  # {user_id: {original_doc, alt_docs, filename}}
+pending = {}  # {user_id: {options: [...], filename: str}}
 
 def format_size(b):
     if b < 1024: return f"{b} B"
@@ -23,59 +22,19 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def get_video_options(msg):
-    """Extrae todas las calidades disponibles"""
-    options = []
-    if msg.media and msg.media.document:
-        doc = msg.media.document
-        
-        # Documento original
-        filename = "video.mp4"
-        duration = 0
-        w = h = 0
-        for attr in doc.attributes:
-            if isinstance(attr, DocumentAttributeFilename) and attr.file_name:
-                filename = attr.file_name
-            if isinstance(attr, DocumentAttributeVideo):
-                duration = attr.duration
-                w = attr.w
-                h = attr.h
-        
-        options.append({
-            "doc": doc,
-            "size": doc.size,
-            "w": w,
-            "h": h,
-            "label": f"ORIGINAL {w}x{h} ({format_size(doc.size)})"
-        })
-        
-        # Documentos alternativos
-        if msg.media.alt_documents:
-            for alt in msg.media.alt_documents:
-                aw = ah = 0
-                aduration = 0
-                for attr in alt.attributes:
-                    if isinstance(attr, DocumentAttributeVideo):
-                        aw = attr.w
-                        ah = attr.h
-                        aduration = attr.duration
-                options.append({
-                    "doc": alt,
-                    "size": alt.size,
-                    "w": aw,
-                    "h": ah,
-                    "label": f"COMPRIMIDO {aw}x{ah} ({format_size(alt.size)})"
-                })
-    
-    return options, filename
-
-async def upload_async(event, filepath, filename, size):
-    msg = await event.reply("UPLOADING...")
+async def subir_y_responder(event, doc, filename):
+    msg = await event.reply("DOWNLOADING...")
     ext = os.path.splitext(filename)[1] or ".bin"
-
+    temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
+    
+    filepath = await bot.download_file(doc, file=temp_path)
+    size = os.path.getsize(filepath)
+    
+    await msg.edit("UPLOADING...")
+    
     remote = f"{uuid.uuid4().hex[:8]}_{filename}"
     url = f"{S3}/{remote}"
-
+    
     def subir():
         try:
             with open(filepath, 'rb') as f:
@@ -84,9 +43,9 @@ async def upload_async(event, filepath, filename, size):
         except Exception as e:
             print(f"Upload error: {e}")
             return None
-
+    
     result = await bot.loop.run_in_executor(None, subir)
-
+    
     if result and result.status_code == 200:
         stats["archivos_subidos"] += 1
         stats["total_bytes"] += size
@@ -101,7 +60,7 @@ async def upload_async(event, filepath, filename, size):
     else:
         status = result.status_code if result else "failed"
         await msg.edit(f"ERROR: HTTP {status}")
-
+    
     try: os.remove(filepath)
     except: pass
 
@@ -111,38 +70,42 @@ async def handler(event):
     msg = event.message
     user_id = event.sender_id
 
-    # ─── VIDEO: mostrar calidades ───
-    if msg.video or (msg.media and msg.media.document):
-        options, filename = get_video_options(msg)
+    if msg.video:
+        # Video con posible calidad alternativa
+        doc_original = msg.video
+        size_original = doc_original.size
+        w_original = doc_original.w
+        h_original = doc_original.h
         
-        if len(options) > 1:
-            pending_videos[user_id] = {"options": options, "filename": filename}
+        options = []
+        options.append(("ORIGINAL", doc_original))
+        
+        if msg.media and msg.media.document and msg.media.alt_documents:
+            for alt in msg.media.alt_documents:
+                options.append(("COMPRIMIDO", alt))
+        
+        filename = f"video_{msg.video.id}.mp4"
+        
+        if len(options) == 2:
+            pending[user_id] = {"options": options, "filename": filename}
             
-            # Crear botones
-            from telethon.tl.types import ReplyInlineMarkup, KeyboardButtonRow, KeyboardButtonCallback
-            from telethon.tl.custom import Button
-            
-            botones = []
-            for i, opt in enumerate(options):
-                botones.append(Button.inline(opt["label"], f"quality_{i}"))
+            orig_size = format_size(size_original)
+            alt_size = format_size(msg.media.alt_documents[0].size) if msg.media.alt_documents else "?"
             
             await event.reply(
-                "🎬 SELECT QUALITY:",
-                buttons=botones
+                f"🎬 SELECT QUALITY:\n"
+                f"┎ ORIGINAL {w_original}x{h_original} ({orig_size})\n"
+                f"┖ COMPRIMIDO ({alt_size})",
+                buttons=[
+                    [Button.inline(f"ORIGINAL ({orig_size})", "quality_0")],
+                    [Button.inline(f"COMPRIMIDO ({alt_size})", "quality_1")]
+                ]
             )
         else:
-            # Solo una calidad - subir directo
-            await event.reply("DOWNLOADING...")
-            doc = options[0]["doc"]
-            ext = os.path.splitext(filename)[1] or ".bin"
-            temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
-            filepath = await bot.download_file(doc, file=temp_path)
-            if filepath:
-                size = os.path.getsize(filepath)
-                asyncio.create_task(upload_async(event, filepath, filename, size))
+            # Solo una calidad
+            asyncio.create_task(subir_y_responder(event, doc_original, filename))
         return
 
-    # ─── CALLBACK DE CALIDAD ───
     if texto == '/start':
         await event.reply("Send me a video and choose quality.")
     elif texto == '/stats':
@@ -155,25 +118,16 @@ async def callback_handler(event):
     user_id = event.sender_id
     data = event.data.decode()
     
-    if data.startswith("quality_") and user_id in pending_videos:
+    if data.startswith("quality_") and user_id in pending:
         idx = int(data.split("_")[1])
-        info = pending_videos[user_id]
-        opt = info["options"][idx]
+        info = pending.pop(user_id)
+        doc = info["options"][idx][1]
+        filename = info["filename"]
         
-        await event.answer(f"Selected: {opt['label']}")
+        await event.answer(f"Descargando...")
         await event.edit("DOWNLOADING...")
         
-        doc = opt["doc"]
-        filename = info["filename"]
-        ext = os.path.splitext(filename)[1] or ".bin"
-        temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
-        
-        filepath = await bot.download_file(doc, file=temp_path)
-        if filepath:
-            size = os.path.getsize(filepath)
-            asyncio.create_task(upload_async(event, filepath, filename, size))
-        
-        del pending_videos[user_id]
+        asyncio.create_task(subir_y_responder(event, doc, filename))
 
 def ping_render():
     while True:
