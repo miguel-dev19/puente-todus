@@ -12,13 +12,6 @@ DOWNLOAD_PATH = "/tmp/todus_uploads"
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
 stats = {"start_time": time.time(), "archivos_subidos": 0, "total_bytes": 0, "ultimo_archivo": None}
-user_locks = {}
-user_locks_lock = threading.Lock()
-
-def get_user_lock(uid):
-    with user_locks_lock:
-        if uid not in user_locks: user_locks[uid] = threading.Lock()
-        return user_locks[uid]
 
 def progress_bar(pct, w=15):
     f = int(w * pct / 100)
@@ -32,32 +25,65 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
+def get_filename(event):
+    if event.message.file and event.message.file.name:
+        return event.message.file.name
+    if event.message.photo:
+        return f"photo_{event.message.photo.id}.jpg"
+    if event.message.video:
+        return f"video_{event.message.video.id}.mp4"
+    if event.message.audio:
+        return f"audio_{event.message.audio.id}.mp3"
+    if event.message.document:
+        mime = event.message.document.mime_type or ""
+        ext_map = {
+            "application/pdf": ".pdf", "application/zip": ".zip",
+            "application/x-rar": ".rar", "image/jpeg": ".jpg",
+            "image/png": ".png", "video/mp4": ".mp4",
+            "audio/mpeg": ".mp3",
+        }
+        ext = ext_map.get(mime, ".bin")
+        return f"document_{uuid.uuid4().hex[:6]}{ext}"
+    return f"file_{uuid.uuid4().hex[:6]}.bin"
+
 async def upload_async(event, filepath, filename, size):
-    """Sube archivo de forma asíncrona sin crear loops extra"""
+    # UN SOLO MENSAJE que se va editando
     msg = await event.reply("PROCESSING...")
     ext = os.path.splitext(filename)[1] or ".bin"
 
-    await msg.edit(
-        f"┎ UPLOADING\n"
-        f"┠ [{progress_bar(0)}]\n"
-        f"┠ PERCENTAGE: 0%\n"
-        f"┖ SIZE: 0 B/{format_size(size)}"
-    )
-
     remote = f"{uuid.uuid4().hex[:8]}_{filename}"
     url = f"{S3}/{remote}"
+    uploaded = 0
+    last_pct = -15
+    start_time = time.time()
 
-    # Subir en thread aparte pero SIN crear event loop
     def subir():
-        try:
-            with open(filepath, 'rb') as f:
-                headers = {"Content-Length": str(size)}
-                return requests.put(url, data=f, headers=headers, timeout=300)
-        except Exception as e:
-            return None
+        """Sube y actualiza progreso usando callback al loop principal"""
+        nonlocal uploaded, last_pct
+        with open(filepath, 'rb') as f:
+            headers = {"Content-Length": str(size)}
+            # Subir en chunks para actualizar progreso
+            def gen():
+                nonlocal uploaded, last_pct
+                while True:
+                    chunk = f.read(2048 * 1024)
+                    if not chunk: break
+                    uploaded += len(chunk)
+                    pct = int((uploaded / size) * 100)
+                    if pct - last_pct >= 15 or pct == 100:
+                        last_pct = pct
+                        asyncio.create_task(msg.edit(
+                            f"┎ UPLOADING\n"
+                            f"┠ [{progress_bar(pct)}]\n"
+                            f"┠ PERCENTAGE: {pct}%\n"
+                            f"┖ SIZE: {format_size(uploaded)}/{format_size(size)}"
+                        ))
+                    yield chunk
+
+            return requests.put(url, data=gen(), headers=headers, timeout=300)
 
     result = await bot.loop.run_in_executor(None, subir)
-    
+
     if result and result.status_code == 200:
         stats["archivos_subidos"] += 1
         stats["total_bytes"] += size
@@ -71,24 +97,21 @@ async def upload_async(event, filepath, filename, size):
         )
     else:
         await msg.edit(f"ERROR: HTTP {result.status_code if result else 'failed'}")
-    
+
     try: os.remove(filepath)
     except: pass
 
 @bot.on(events.NewMessage)
 async def handler(event):
-    user_id = event.sender_id
     texto = event.message.text or ""
 
-    if event.message.file:
-        await event.reply("PROCESSING...")
-        ext = os.path.splitext(event.message.file.name or "file")[1] or ".bin"
+    if event.message.file or event.message.document:
+        filename = get_filename(event)
+        ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
         filepath = await event.message.download_media(file=temp_path)
         if filepath:
-            filename = event.message.file.name or f"file{ext}"
             size = os.path.getsize(filepath)
-            # NO crear thread manual - usar run_in_executor dentro del handler
             asyncio.create_task(upload_async(event, filepath, filename, size))
     elif texto == '/start':
         await event.reply("Send me any file and I'll upload it to ToDus S3.")
