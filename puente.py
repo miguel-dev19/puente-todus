@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bot Telegram: @s3tdupload_bot - uploader to S3 ToDus"""
+"""Bot Telegram: @s3tdupload_bot - sube el documento ORIGINAL"""
 import os, uuid, asyncio, requests, time, threading
 from telethon import TelegramClient, events
 
@@ -21,19 +21,6 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def get_filename(msg):
-    if msg.file and msg.file.name:
-        return msg.file.name
-    if msg.photo:
-        return f"photo_{msg.photo.id}.jpg"
-    if msg.video:
-        return f"video_{msg.video.id}.mp4"
-    if msg.audio:
-        return f"audio_{msg.audio.id}.mp3"
-    if msg.document:
-        return f"document_{uuid.uuid4().hex[:6]}"
-    return f"file_{uuid.uuid4().hex[:6]}.bin"
-
 async def upload_async(event, filepath, filename, size):
     msg = await event.reply("DOWNLOADING...")
     ext = os.path.splitext(filename)[1] or ".bin"
@@ -48,7 +35,7 @@ async def upload_async(event, filepath, filename, size):
         try:
             with open(filepath, 'rb') as f:
                 headers = {"Content-Length": str(size)}
-                return requests.put(url, data=f, headers=headers, timeout=300)
+                return requests.put(url, data=f, headers=headers, timeout=600)
         except Exception as e:
             print(f"Upload error: {e}")
             return None
@@ -79,18 +66,29 @@ async def handler(event):
     msg = event.message
 
     if msg.media:
-        filename = get_filename(msg)
+        # Obtener documento principal (NO el alternativo)
+        if msg.media.document:
+            doc = msg.media.document
+            filename = "video.mp4"
+            size = doc.size
+            for attr in doc.attributes:
+                if hasattr(attr, 'file_name') and attr.file_name:
+                    filename = attr.file_name
+                    break
+        else:
+            filename = f"file_{uuid.uuid4().hex[:6]}.bin"
+            size = 0
+
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
+        
         try:
-            # Descargar archivo original
+            # Descargar documento PRINCIPAL
             filepath = await msg.download_media(file=temp_path)
             if filepath:
-                size = os.path.getsize(filepath)
-                print(f"Downloaded: {filename} ({format_size(size)})")
-                asyncio.create_task(upload_async(event, filepath, filename, size))
-            else:
-                await event.reply("ERROR: Could not download file")
+                actual_size = os.path.getsize(filepath)
+                print(f"Documento: {size} | Descargado: {actual_size}")
+                asyncio.create_task(upload_async(event, filepath, filename, actual_size))
         except Exception as e:
             await event.reply(f"ERROR: {str(e)[:100]}")
     elif texto == '/start':
@@ -98,9 +96,7 @@ async def handler(event):
     elif texto == '/stats':
         uptime = int(time.time() - stats["start_time"])
         h, m = divmod(uptime, 3600); m, s = divmod(m, 60)
-        await event.reply(
-            f"UPTIME: {h}h {m}m {s}s\nFILES: {stats['archivos_subidos']}\nTOTAL: {format_size(stats['total_bytes'])}"
-        )
+        await event.reply(f"UPTIME: {h}h {m}m {s}s\nFILES: {stats['archivos_subidos']}")
 
 def ping_render():
     while True:
