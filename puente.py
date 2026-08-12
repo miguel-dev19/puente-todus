@@ -2,6 +2,7 @@
 """Bot Telegram: @s3tdupload_bot - uploader to S3 ToDus"""
 import os, uuid, asyncio, requests, time, threading
 from telethon import TelegramClient, events
+from telethon.tl.types import DocumentAttributeVideo
 
 API_ID = 32471788
 API_HASH = "cb57130abda56877acf3b3027e569450"
@@ -21,17 +22,19 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def get_filename_and_size(event):
+def get_filename(event):
     msg = event.message
-    if msg.video:
-        return f"video_{msg.video.id}.mp4", msg.video.size
-    if msg.photo:
-        return f"photo_{msg.photo.id}.jpg", msg.photo.sizes[-1].size if msg.photo.sizes else 0
     if msg.file and msg.file.name:
-        return msg.file.name, msg.file.size
+        return msg.file.name
+    if msg.photo:
+        return f"photo_{msg.photo.id}.jpg"
+    if msg.video:
+        return f"video_{msg.video.id}.mp4"
+    if msg.audio:
+        return f"audio_{msg.audio.id}.mp3"
     if msg.document:
-        return f"document_{uuid.uuid4().hex[:6]}", msg.document.size
-    return f"file_{uuid.uuid4().hex[:6]}.bin", 0
+        return f"document_{uuid.uuid4().hex[:6]}"
+    return f"file_{uuid.uuid4().hex[:6]}.bin"
 
 async def upload_async(event, filepath, filename, size):
     msg = await event.reply("DOWNLOADING...")
@@ -78,17 +81,18 @@ async def handler(event):
     msg = event.message
 
     if msg.media:
-        filename, original_size = get_filename_and_size(event)
+        filename = get_filename(event)
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
         try:
-            # Descargar con el tamaño real del documento
-            filepath = await msg.download_media(file=temp_path)
+            # Descargar archivo ORIGINAL con download_file
+            filepath = await msg.download_file(file=temp_path)
             if filepath:
-                actual_size = os.path.getsize(filepath)
-                print(f"Original: {original_size} | Actual: {actual_size}")
-                # Usar el tamaño real del archivo descargado
-                asyncio.create_task(upload_async(event, filepath, filename, actual_size))
+                size = os.path.getsize(filepath)
+                print(f"Downloaded: {filename} ({format_size(size)})")
+                asyncio.create_task(upload_async(event, filepath, filename, size))
+            else:
+                await event.reply("ERROR: Could not download file")
         except Exception as e:
             await event.reply(f"ERROR: {str(e)[:100]}")
     elif texto == '/start':
