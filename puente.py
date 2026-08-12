@@ -22,16 +22,17 @@ def format_size(b):
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
 def get_filename(event):
-    if event.message.file and event.message.file.name:
-        return event.message.file.name
-    if event.message.photo:
-        return f"photo_{event.message.photo.id}.jpg"
-    if event.message.video:
-        return f"video_{event.message.video.id}.mp4"
-    if event.message.audio:
-        return f"audio_{event.message.audio.id}.mp3"
-    if event.message.document:
-        mime = event.message.document.mime_type or ""
+    msg = event.message
+    if msg.file and msg.file.name:
+        return msg.file.name
+    if msg.photo:
+        return f"photo_{msg.photo.id}.jpg"
+    if msg.video:
+        return f"video_{msg.video.id}.mp4"
+    if msg.audio:
+        return f"audio_{msg.audio.id}.mp3"
+    if msg.document:
+        mime = msg.document.mime_type or ""
         ext_map = {
             "application/pdf": ".pdf", "application/zip": ".zip",
             "application/x-rar": ".rar", "image/jpeg": ".jpg",
@@ -49,7 +50,6 @@ async def upload_async(event, filepath, filename, size):
     remote = f"{uuid.uuid4().hex[:8]}_{filename}"
     url = f"{S3}/{remote}"
 
-    # Subir SIN generador - directo
     def subir():
         try:
             with open(filepath, 'rb') as f:
@@ -82,15 +82,25 @@ async def upload_async(event, filepath, filename, size):
 @bot.on(events.NewMessage)
 async def handler(event):
     texto = event.message.text or ""
+    msg = event.message
 
-    if event.message.file or event.message.document or event.message.photo:
+    # Detectar cualquier tipo de media
+    if msg.media:
         filename = get_filename(event)
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
-        filepath = await event.message.download_media(file=temp_path)
-        if filepath:
-            size = os.path.getsize(filepath)
-            asyncio.create_task(upload_async(event, filepath, filename, size))
+        
+        try:
+            # Descargar usando download_media con soporte para reenviados
+            filepath = await msg.download_media(file=temp_path)
+            if filepath:
+                size = os.path.getsize(filepath)
+                asyncio.create_task(upload_async(event, filepath, filename, size))
+            else:
+                await event.reply("ERROR: Could not download file")
+        except Exception as e:
+            await event.reply(f"ERROR: {str(e)[:100]}")
+    
     elif texto == '/start':
         await event.reply("Send me any file and I'll upload it to ToDus S3.")
     elif texto == '/stats':
