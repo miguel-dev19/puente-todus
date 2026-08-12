@@ -32,52 +32,48 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def upload_worker(event, filepath, filename, size, user_id):
-    lock = get_user_lock(user_id)
-    with lock:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def _upload():
-            msg = await event.reply("PROCESSING...")
-            ext = os.path.splitext(filename)[1] or ".bin"
+async def upload_async(event, filepath, filename, size):
+    """Sube archivo de forma asíncrona sin crear loops extra"""
+    msg = await event.reply("PROCESSING...")
+    ext = os.path.splitext(filename)[1] or ".bin"
 
-            await msg.edit(
-                f"┎ UPLOADING\n"
-                f"┠ [{progress_bar(0)}]\n"
-                f"┠ PERCENTAGE: 0%\n"
-                f"┖ SIZE: 0 B/{format_size(size)}"
-            )
+    await msg.edit(
+        f"┎ UPLOADING\n"
+        f"┠ [{progress_bar(0)}]\n"
+        f"┠ PERCENTAGE: 0%\n"
+        f"┖ SIZE: 0 B/{format_size(size)}"
+    )
 
-            remote = f"{uuid.uuid4().hex[:8]}_{filename}"
-            url = f"{S3}/{remote}"
+    remote = f"{uuid.uuid4().hex[:8]}_{filename}"
+    url = f"{S3}/{remote}"
 
-            try:
-                with open(filepath, 'rb') as f:
-                    headers = {"Content-Length": str(size)}
-                    r = requests.put(url, data=f, headers=headers, timeout=300)
-                
-                if r.status_code == 200:
-                    stats["archivos_subidos"] += 1
-                    stats["total_bytes"] += size
-                    stats["ultimo_archivo"] = filename
-                    name_no_ext = os.path.splitext(filename)[0].replace('_', ' ')
-                    await msg.edit(
-                        f"┎ NAME: {name_no_ext}\n"
-                        f"┠ EXTENSION: {ext.replace('.', '')}\n"
-                        f"┠ SIZE: {format_size(size)}\n"
-                        f"┖ URL: {url}"
-                    )
-                else:
-                    await msg.edit(f"ERROR: HTTP {r.status_code}")
-            except Exception as e:
-                await msg.edit(f"ERROR: {str(e)[:200]}")
-            finally:
-                try: os.remove(filepath)
-                except: pass
+    # Subir en thread aparte pero SIN crear event loop
+    def subir():
+        try:
+            with open(filepath, 'rb') as f:
+                headers = {"Content-Length": str(size)}
+                return requests.put(url, data=f, headers=headers, timeout=300)
+        except Exception as e:
+            return None
 
-        loop.run_until_complete(_upload())
-        loop.close()
+    result = await bot.loop.run_in_executor(None, subir)
+    
+    if result and result.status_code == 200:
+        stats["archivos_subidos"] += 1
+        stats["total_bytes"] += size
+        stats["ultimo_archivo"] = filename
+        name_no_ext = os.path.splitext(filename)[0].replace('_', ' ')
+        await msg.edit(
+            f"┎ NAME: {name_no_ext}\n"
+            f"┠ EXTENSION: {ext.replace('.', '')}\n"
+            f"┠ SIZE: {format_size(size)}\n"
+            f"┖ URL: {url}"
+        )
+    else:
+        await msg.edit(f"ERROR: HTTP {result.status_code if result else 'failed'}")
+    
+    try: os.remove(filepath)
+    except: pass
 
 @bot.on(events.NewMessage)
 async def handler(event):
@@ -92,7 +88,8 @@ async def handler(event):
         if filepath:
             filename = event.message.file.name or f"file{ext}"
             size = os.path.getsize(filepath)
-            threading.Thread(target=upload_worker, args=(event, filepath, filename, size, user_id), daemon=True).start()
+            # NO crear thread manual - usar run_in_executor dentro del handler
+            asyncio.create_task(upload_async(event, filepath, filename, size))
     elif texto == '/start':
         await event.reply("Send me any file and I'll upload it to ToDus S3.")
     elif texto == '/stats':
