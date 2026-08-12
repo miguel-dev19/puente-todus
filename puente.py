@@ -2,7 +2,6 @@
 """Bot Telegram: @s3tdupload_bot - uploader to S3 ToDus"""
 import os, uuid, asyncio, requests, time, threading
 from telethon import TelegramClient, events
-from telethon.tl.types import DocumentAttributeVideo
 
 API_ID = 32471788
 API_HASH = "cb57130abda56877acf3b3027e569450"
@@ -22,8 +21,7 @@ def format_size(b):
 
 bot = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-def get_filename(event):
-    msg = event.message
+def get_filename(msg):
     if msg.file and msg.file.name:
         return msg.file.name
     if msg.photo:
@@ -81,12 +79,12 @@ async def handler(event):
     msg = event.message
 
     if msg.media:
-        filename = get_filename(event)
+        filename = get_filename(msg)
         ext = os.path.splitext(filename)[1] or ".bin"
         temp_path = os.path.join(DOWNLOAD_PATH, f"{uuid.uuid4().hex}{ext}")
         try:
-            # Descargar archivo ORIGINAL con download_file
-            filepath = await msg.download_file(file=temp_path)
+            # Descargar archivo original
+            filepath = await msg.download_media(file=temp_path)
             if filepath:
                 size = os.path.getsize(filepath)
                 print(f"Downloaded: {filename} ({format_size(size)})")
