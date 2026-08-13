@@ -42,8 +42,7 @@ function getAllVideoQualities(videoData) {
             height: attr?.h || 0,
             quality: `${attr?.w || 0}p`,
             is_main: true,
-            mime_type: videoData.document.mime_type,
-            label: `📹 ${attr?.w || 0}p (principal)`
+            mime_type: videoData.document.mime_type
         });
     }
     
@@ -52,11 +51,6 @@ function getAllVideoQualities(videoData) {
         for (const doc of videoData.alt_documents) {
             const attr = doc.attributes.find(a => a._ === 'DocumentAttributeVideo');
             if (attr && doc.mime_type === 'video/mp4') {
-                // Detectar codec
-                let codec = '';
-                if (doc.attributes.some(a => a.video_codec === 'av01')) codec = 'AV1';
-                else if (doc.attributes.some(a => a.video_codec === 'h264')) codec = 'H264';
-                
                 qualities.push({
                     file_id: doc.id,
                     access_hash: doc.access_hash,
@@ -65,9 +59,7 @@ function getAllVideoQualities(videoData) {
                     height: attr.h || 0,
                     quality: `${attr.w || 0}p`,
                     is_main: false,
-                    mime_type: doc.mime_type,
-                    codec: codec,
-                    label: `📹 ${attr.w || 0}p${codec ? ` (${codec})` : ''}`
+                    mime_type: doc.mime_type
                 });
             }
         }
@@ -89,15 +81,19 @@ bot.start(async (ctx) => {
     );
 });
 
-// ─── PROCESAR ARCHIVO ───
+// ─── PROCESAR ARCHIVO (usando file_id directamente) ───
 async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
     try {
-        const file = await ctx.telegram.getFile(fileId);
+        // Obtener URL directa del archivo usando file_id
+        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileId}`;
         
-        if (file.file_size && file.file_size > MAX_FILE_SIZE) {
+        // Verificar si el archivo existe y obtener tamaño
+        let totalSize = fileInfo.size || 0;
+        
+        if (totalSize > MAX_FILE_SIZE) {
             await ctx.reply(
                 `❌ Archivo demasiado grande\n` +
-                `📏 ${formatSize(file.file_size)} > ${formatSize(MAX_FILE_SIZE)}`
+                `📏 ${formatSize(totalSize)} > ${formatSize(MAX_FILE_SIZE)}`
             );
             return;
         }
@@ -105,16 +101,23 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
         const status = await ctx.reply("⏳ Procesando...");
 
         const tempPath = path.join(DOWNLOAD_PATH, `${crypto.randomBytes(8).toString('hex')}${ext}`);
-        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
 
+        // Descargar con progreso
         const response = await axios({
             method: 'get',
             url: fileUrl,
             responseType: 'stream',
-            timeout: 300000
+            timeout: 300000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0'
+            }
         });
 
-        const totalSize = Number(response.headers['content-length']) || 0;
+        // Si no tenemos tamaño, intentar obtenerlo del header
+        if (!totalSize) {
+            totalSize = Number(response.headers['content-length']) || 0;
+        }
+
         let downloaded = 0;
         let lastPct = -10;
 
@@ -148,6 +151,7 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
 
         const size = fs.statSync(tempPath).size;
 
+        // Subir a S3
         const remote = `${crypto.randomBytes(4).toString('hex')}_${filename}`;
         const uploadUrl = `${S3}/${remote}`;
 
@@ -190,7 +194,7 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
         fs.removeSync(tempPath);
 
     } catch (e) {
-        console.error('Error:', e);
+        console.error('Error en processFile:', e);
         await ctx.reply(`❌ Error: ${e.message.slice(0, 150)}`);
     }
 }
@@ -211,7 +215,12 @@ bot.on('video', async (ctx) => {
         // Si solo hay una calidad, procesar directamente
         if (qualities.length === 1) {
             const q = qualities[0];
-            await ctx.reply(`🎬 Video detectado\n📹 ${q.quality}\n📦 ${formatSize(q.size)}\n\n⏳ Procesando...`);
+            await ctx.reply(
+                `🎬 Video detectado\n` +
+                `📹 ${q.quality}\n` +
+                `📦 ${formatSize(q.size)}\n\n` +
+                `⏳ Procesando...`
+            );
             
             await processFile(
                 ctx,
@@ -238,7 +247,7 @@ bot.on('video', async (ctx) => {
             else if (q.quality.includes('360')) emoji = '📱';
             
             const label = `${emoji} ${q.quality} (${formatSize(q.size)})`;
-            const callbackData = `quality_${q.file_id}_${q.access_hash}_${q.quality}_${q.width}x${q.height}`;
+            const callbackData = `quality_${q.file_id}_${q.access_hash}_${q.quality}_${q.width}x${q.height}_${q.size}`;
             
             buttons.push([{ text: label, callback_data: callbackData }]);
         }
@@ -264,7 +273,7 @@ bot.on('video', async (ctx) => {
 });
 
 // ─── MANEJAR SELECCIÓN DE CALIDAD ───
-bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)/, async (ctx) => {
+bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)_(.+)/, async (ctx) => {
     try {
         const match = ctx.match;
         const fileId = match[1];
@@ -272,6 +281,7 @@ bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)/, async (ctx) => {
         const quality = match[3];
         const width = match[4];
         const height = match[5];
+        const size = parseInt(match[6]);
         
         // Responder al callback (quita el loading)
         await ctx.answerCbQuery(`✅ Seleccionada calidad ${quality}`);
@@ -283,6 +293,7 @@ bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)/, async (ctx) => {
         await ctx.reply(
             `✅ Calidad seleccionada: ${quality}\n` +
             `📐 Resolución: ${width}x${height}\n` +
+            `📦 Tamaño: ${formatSize(size)}\n` +
             `⏳ Iniciando procesamiento...`
         );
         
@@ -294,7 +305,8 @@ bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)/, async (ctx) => {
             '.mp4',
             {
                 quality: quality,
-                resolution: `${width}x${height}`
+                resolution: `${width}x${height}`,
+                size: size
             }
         );
         
@@ -317,7 +329,10 @@ bot.on('document', async (ctx) => {
         const doc = ctx.message.document;
         const filename = doc.file_name || `doc_${doc.file_id}`;
         const ext = path.extname(filename) || '.bin';
-        await processFile(ctx, doc.file_id, filename, ext, { type: 'documento' });
+        await processFile(ctx, doc.file_id, filename, ext, { 
+            type: 'documento',
+            size: doc.file_size || 0
+        });
     } catch (e) {
         await ctx.reply(`❌ Error: ${e.message}`);
     }
@@ -328,7 +343,10 @@ bot.on('photo', async (ctx) => {
     try {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1];
-        await processFile(ctx, photo.file_id, `photo_${photo.file_id}.jpg`, '.jpg', { type: 'foto' });
+        await processFile(ctx, photo.file_id, `photo_${photo.file_id}.jpg`, '.jpg', { 
+            type: 'foto',
+            size: photo.file_size || 0
+        });
     } catch (e) {
         await ctx.reply(`❌ Error: ${e.message}`);
     }
@@ -338,7 +356,10 @@ bot.on('photo', async (ctx) => {
 bot.on('audio', async (ctx) => {
     try {
         const audio = ctx.message.audio;
-        await processFile(ctx, audio.file_id, `audio_${audio.file_id}.mp3`, '.mp3', { type: 'audio' });
+        await processFile(ctx, audio.file_id, `audio_${audio.file_id}.mp3`, '.mp3', { 
+            type: 'audio',
+            size: audio.file_size || 0
+        });
     } catch (e) {
         await ctx.reply(`❌ Error: ${e.message}`);
     }
@@ -365,3 +386,4 @@ setInterval(() => {
 bot.launch();
 console.log('🤖 Bot Puente ToDus iniciado correctamente');
 console.log('🎬 Modo: Selección interactiva de calidad de video');
+console.log('⚡ Usando URL directa de Telegram (sin getFile)');
