@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const BOT_TOKEN = "8864221542:AAHAJ_cb_Y1BmotZrx8GzaFKELfLsK3sJDQ";
 const S3 = "https://s3.todus.cu/stream";
 const DOWNLOAD_PATH = "/tmp/todus_uploads";
-const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 fs.ensureDirSync(DOWNLOAD_PATH);
 
@@ -29,7 +28,7 @@ function progressBar(pct) {
 
 function getAllVideoQualities(videoData) {
     const qualities = [];
-    
+
     if (videoData.document) {
         const attr = videoData.document.attributes.find(a => a._ === 'DocumentAttributeVideo');
         qualities.push({
@@ -40,7 +39,7 @@ function getAllVideoQualities(videoData) {
             quality: `${attr?.w || 0}p`
         });
     }
-    
+
     if (videoData.alt_documents) {
         for (const doc of videoData.alt_documents) {
             const attr = doc.attributes.find(a => a._ === 'DocumentAttributeVideo');
@@ -55,7 +54,7 @@ function getAllVideoQualities(videoData) {
             }
         }
     }
-    
+
     qualities.sort((a, b) => a.size - b.size);
     return qualities;
 }
@@ -63,35 +62,25 @@ function getAllVideoQualities(videoData) {
 bot.start(async (ctx) => {
     await ctx.reply(
         `👋 Envíame un archivo y lo subo a ToDus S3\n` +
-        `📦 Límite: 50 MB\n` +
+        `📦 Sin límite de tamaño\n` +
         `🎬 Videos: puedes elegir la calidad`
     );
 });
 
-// ─── PROCESAR ARCHIVO CON getFileLink() ───
+// ─── PROCESAR ARCHIVO (SIN LÍMITE) ───
 async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
     try {
-        // ✅ OBTENER URL DIRECTA (sin límite de tamaño)
         const fileLink = await ctx.telegram.getFileLink(fileId);
-        
         const totalSize = fileInfo.size || 0;
-        
-        if (totalSize > MAX_FILE_SIZE) {
-            await ctx.reply(
-                `❌ Archivo muy grande\n📏 ${formatSize(totalSize)} > ${formatSize(MAX_FILE_SIZE)}`
-            );
-            return;
-        }
 
         const status = await ctx.reply("⏳ Procesando...");
         const tempPath = path.join(DOWNLOAD_PATH, `${crypto.randomBytes(8).toString('hex')}${ext}`);
 
-        // Descargar usando la URL directa
         const response = await axios({
             method: 'get',
-            url: fileLink.toString(), // ✅ URL directa
+            url: fileLink.toString(),
             responseType: 'stream',
-            timeout: 300000
+            timeout: 600000 // 10 minutos para archivos grandes
         });
 
         let downloaded = 0;
@@ -126,7 +115,6 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
 
         const size = fs.statSync(tempPath).size;
 
-        // Subir a S3
         const remote = `${crypto.randomBytes(4).toString('hex')}_${filename}`;
         const uploadUrl = `${S3}/${remote}`;
 
@@ -154,12 +142,12 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
 
         await axios.put(uploadUrl, fileStream, {
             headers: { 'Content-Length': size },
-            timeout: 600000
+            timeout: 900000 // 15 minutos para archivos grandes
         });
 
         const name = path.basename(filename, ext).replace(/_/g, ' ');
         let msg = `✅ ¡Subido!\n\n📄 ${name}\n📦 ${formatSize(size)}\n🔗 ${uploadUrl}`;
-        
+
         if (fileInfo.quality) {
             msg += `\n🎬 ${fileInfo.quality} (${fileInfo.resolution})`;
         }
@@ -178,12 +166,12 @@ bot.on('video', async (ctx) => {
     try {
         const videoData = ctx.message.video;
         const qualities = getAllVideoQualities(videoData);
-        
+
         if (qualities.length === 0) {
             await ctx.reply('❌ No se pudo procesar el video');
             return;
         }
-        
+
         if (qualities.length === 1) {
             const q = qualities[0];
             await ctx.reply(`🎬 ${q.quality} - ${formatSize(q.size)}`);
@@ -194,34 +182,32 @@ bot.on('video', async (ctx) => {
             });
             return;
         }
-        
-        // Múltiples calidades: botones
+
         const buttons = [];
         for (const q of qualities) {
             let emoji = '📹';
             if (q.quality.includes('720')) emoji = '🎬';
             else if (q.quality.includes('480')) emoji = '📱';
             else if (q.quality.includes('360')) emoji = '📱';
-            
+
             buttons.push([{
                 text: `${emoji} ${q.quality} (${formatSize(q.size)})`,
                 callback_data: `q_${q.file_id}_${q.quality}_${q.width}_${q.height}_${q.size}`
             }]);
         }
         buttons.push([{ text: '❌ Cancelar', callback_data: 'cancel' }]);
-        
+
         await ctx.reply(
             `🎬 Elige la calidad:`,
             { reply_markup: { inline_keyboard: buttons } }
         );
-        
+
     } catch (e) {
         console.error('Error:', e);
         await ctx.reply(`❌ Error: ${e.message}`);
     }
 });
 
-// ─── SELECCIÓN DE CALIDAD ───
 bot.action(/q_(.+)_(.+)_(.+)_(.+)_(.+)/, async (ctx) => {
     try {
         const match = ctx.match;
@@ -230,17 +216,17 @@ bot.action(/q_(.+)_(.+)_(.+)_(.+)_(.+)/, async (ctx) => {
         const width = match[3];
         const height = match[4];
         const size = parseInt(match[5]);
-        
+
         await ctx.answerCbQuery(`✅ ${quality}`);
         await ctx.deleteMessage();
-        
+
         await ctx.reply(`✅ ${quality} - ${formatSize(size)}`);
         await processFile(ctx, fileId, `video_${fileId}.mp4`, '.mp4', {
             quality: quality,
             resolution: `${width}x${height}`,
             size: size
         });
-        
+
     } catch (e) {
         console.error('Error:', e);
         await ctx.reply(`❌ Error: ${e.message}`);
@@ -259,7 +245,7 @@ bot.on('document', async (ctx) => {
         const doc = ctx.message.document;
         const filename = doc.file_name || `doc_${doc.file_id}`;
         const ext = path.extname(filename) || '.bin';
-        await processFile(ctx, doc.file_id, filename, ext, { 
+        await processFile(ctx, doc.file_id, filename, ext, {
             type: 'documento',
             size: doc.file_size || 0
         });
@@ -273,7 +259,7 @@ bot.on('photo', async (ctx) => {
     try {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1];
-        await processFile(ctx, photo.file_id, `photo_${photo.file_id}.jpg`, '.jpg', { 
+        await processFile(ctx, photo.file_id, `photo_${photo.file_id}.jpg`, '.jpg', {
             type: 'foto',
             size: photo.file_size || 0
         });
@@ -286,7 +272,7 @@ bot.on('photo', async (ctx) => {
 bot.on('audio', async (ctx) => {
     try {
         const audio = ctx.message.audio;
-        await processFile(ctx, audio.file_id, `audio_${audio.file_id}.mp3`, '.mp3', { 
+        await processFile(ctx, audio.file_id, `audio_${audio.file_id}.mp3`, '.mp3', {
             type: 'audio',
             size: audio.file_size || 0
         });
@@ -310,4 +296,5 @@ setInterval(() => {
 
 bot.launch();
 console.log('🤖 Bot iniciado');
+console.log('📦 Sin límite de tamaño');
 console.log('✅ Usando getFileLink() para archivos grandes');
