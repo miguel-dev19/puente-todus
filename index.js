@@ -27,100 +27,75 @@ function progressBar(pct) {
     return '⬢'.repeat(f) + '⬡'.repeat(w - f);
 }
 
-// ─── OBTENER TODAS LAS CALIDADES DE VIDEO ───
 function getAllVideoQualities(videoData) {
     const qualities = [];
     
-    // 1. Calidad principal
     if (videoData.document) {
         const attr = videoData.document.attributes.find(a => a._ === 'DocumentAttributeVideo');
         qualities.push({
             file_id: videoData.document.id,
-            access_hash: videoData.document.access_hash,
             size: videoData.document.size,
             width: attr?.w || 0,
             height: attr?.h || 0,
-            quality: `${attr?.w || 0}p`,
-            is_main: true,
-            mime_type: videoData.document.mime_type
+            quality: `${attr?.w || 0}p`
         });
     }
     
-    // 2. Calidades alternativas
     if (videoData.alt_documents) {
         for (const doc of videoData.alt_documents) {
             const attr = doc.attributes.find(a => a._ === 'DocumentAttributeVideo');
             if (attr && doc.mime_type === 'video/mp4') {
                 qualities.push({
                     file_id: doc.id,
-                    access_hash: doc.access_hash,
                     size: doc.size,
                     width: attr.w || 0,
                     height: attr.h || 0,
-                    quality: `${attr.w || 0}p`,
-                    is_main: false,
-                    mime_type: doc.mime_type
+                    quality: `${attr.w || 0}p`
                 });
             }
         }
     }
     
-    // Ordenar por tamaño (menor a mayor)
     qualities.sort((a, b) => a.size - b.size);
-    
     return qualities;
 }
 
 bot.start(async (ctx) => {
     await ctx.reply(
-        `👋 ¡Hola! Bienvenido a Puente ToDus\n\n` +
-        `📤 Envíame un video y podrás elegir la calidad\n` +
-        `📎 También acepto: documentos, fotos, audios\n` +
-        `📦 Límite: 50 MB\n\n` +
-        `🚀 ¡Envía tu archivo!`
+        `👋 Envíame un archivo y lo subo a ToDus S3\n` +
+        `📦 Límite: 50 MB\n` +
+        `🎬 Videos: puedes elegir la calidad`
     );
 });
 
-// ─── PROCESAR ARCHIVO (usando file_id directamente) ───
+// ─── PROCESAR ARCHIVO CON getFileLink() ───
 async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
     try {
-        // Obtener URL directa del archivo usando file_id
-        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileId}`;
+        // ✅ OBTENER URL DIRECTA (sin límite de tamaño)
+        const fileLink = await ctx.telegram.getFileLink(fileId);
         
-        // Verificar si el archivo existe y obtener tamaño
-        let totalSize = fileInfo.size || 0;
+        const totalSize = fileInfo.size || 0;
         
         if (totalSize > MAX_FILE_SIZE) {
             await ctx.reply(
-                `❌ Archivo demasiado grande\n` +
-                `📏 ${formatSize(totalSize)} > ${formatSize(MAX_FILE_SIZE)}`
+                `❌ Archivo muy grande\n📏 ${formatSize(totalSize)} > ${formatSize(MAX_FILE_SIZE)}`
             );
             return;
         }
 
         const status = await ctx.reply("⏳ Procesando...");
-
         const tempPath = path.join(DOWNLOAD_PATH, `${crypto.randomBytes(8).toString('hex')}${ext}`);
 
-        // Descargar con progreso
+        // Descargar usando la URL directa
         const response = await axios({
             method: 'get',
-            url: fileUrl,
+            url: fileLink.toString(), // ✅ URL directa
             responseType: 'stream',
-            timeout: 300000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0'
-            }
+            timeout: 300000
         });
-
-        // Si no tenemos tamaño, intentar obtenerlo del header
-        if (!totalSize) {
-            totalSize = Number(response.headers['content-length']) || 0;
-        }
 
         let downloaded = 0;
         let lastPct = -10;
-
         const writer = fs.createWriteStream(tempPath);
 
         response.data.on('data', (chunk) => {
@@ -157,7 +132,6 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
 
         let uploaded = 0;
         lastPct = -10;
-
         const fileStream = fs.createReadStream(tempPath, { highWaterMark: 1024 * 1024 });
 
         fileStream.on('data', (chunk) => {
@@ -194,17 +168,15 @@ async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
         fs.removeSync(tempPath);
 
     } catch (e) {
-        console.error('Error en processFile:', e);
+        console.error('Error:', e);
         await ctx.reply(`❌ Error: ${e.message.slice(0, 150)}`);
     }
 }
 
-// ─── MANEJAR VIDEOS CON BOTONES ───
+// ─── VIDEOS CON BOTONES ───
 bot.on('video', async (ctx) => {
     try {
         const videoData = ctx.message.video;
-        
-        // Obtener todas las calidades
         const qualities = getAllVideoQualities(videoData);
         
         if (qualities.length === 0) {
@@ -212,118 +184,76 @@ bot.on('video', async (ctx) => {
             return;
         }
         
-        // Si solo hay una calidad, procesar directamente
         if (qualities.length === 1) {
             const q = qualities[0];
-            await ctx.reply(
-                `🎬 Video detectado\n` +
-                `📹 ${q.quality}\n` +
-                `📦 ${formatSize(q.size)}\n\n` +
-                `⏳ Procesando...`
-            );
-            
-            await processFile(
-                ctx,
-                q.file_id,
-                `video_${q.file_id}.mp4`,
-                '.mp4',
-                {
-                    quality: q.quality,
-                    resolution: `${q.width}x${q.height}`,
-                    size: q.size
-                }
-            );
+            await ctx.reply(`🎬 ${q.quality} - ${formatSize(q.size)}`);
+            await processFile(ctx, q.file_id, `video_${q.file_id}.mp4`, '.mp4', {
+                quality: q.quality,
+                resolution: `${q.width}x${q.height}`,
+                size: q.size
+            });
             return;
         }
         
-        // ─── MÚLTIPLES CALIDADES: MOSTRAR BOTONES ───
+        // Múltiples calidades: botones
         const buttons = [];
-        
         for (const q of qualities) {
-            // Determinar emoji según calidad
             let emoji = '📹';
             if (q.quality.includes('720')) emoji = '🎬';
             else if (q.quality.includes('480')) emoji = '📱';
             else if (q.quality.includes('360')) emoji = '📱';
             
-            const label = `${emoji} ${q.quality} (${formatSize(q.size)})`;
-            const callbackData = `quality_${q.file_id}_${q.access_hash}_${q.quality}_${q.width}x${q.height}_${q.size}`;
-            
-            buttons.push([{ text: label, callback_data: callbackData }]);
+            buttons.push([{
+                text: `${emoji} ${q.quality} (${formatSize(q.size)})`,
+                callback_data: `q_${q.file_id}_${q.quality}_${q.width}_${q.height}_${q.size}`
+            }]);
         }
-        
-        // Botón para cancelar
         buttons.push([{ text: '❌ Cancelar', callback_data: 'cancel' }]);
         
         await ctx.reply(
-            `🎬 Video con múltiples calidades\n\n` +
-            `📊 Selecciona la calidad que deseas subir:\n` +
-            `⚡ Recomendado: la más ligera (arriba)`,
-            {
-                reply_markup: {
-                    inline_keyboard: buttons
-                }
-            }
+            `🎬 Elige la calidad:`,
+            { reply_markup: { inline_keyboard: buttons } }
         );
         
     } catch (e) {
-        console.error('Error en video:', e);
-        await ctx.reply(`❌ Error al procesar el video: ${e.message}`);
-    }
-});
-
-// ─── MANEJAR SELECCIÓN DE CALIDAD ───
-bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)_(.+)/, async (ctx) => {
-    try {
-        const match = ctx.match;
-        const fileId = match[1];
-        const accessHash = match[2];
-        const quality = match[3];
-        const width = match[4];
-        const height = match[5];
-        const size = parseInt(match[6]);
-        
-        // Responder al callback (quita el loading)
-        await ctx.answerCbQuery(`✅ Seleccionada calidad ${quality}`);
-        
-        // Eliminar los botones
-        await ctx.deleteMessage();
-        
-        // Informar al usuario
-        await ctx.reply(
-            `✅ Calidad seleccionada: ${quality}\n` +
-            `📐 Resolución: ${width}x${height}\n` +
-            `📦 Tamaño: ${formatSize(size)}\n` +
-            `⏳ Iniciando procesamiento...`
-        );
-        
-        // Procesar el archivo
-        await processFile(
-            ctx,
-            fileId,
-            `video_${fileId}.mp4`,
-            '.mp4',
-            {
-                quality: quality,
-                resolution: `${width}x${height}`,
-                size: size
-            }
-        );
-        
-    } catch (e) {
-        console.error('Error en acción:', e);
+        console.error('Error:', e);
         await ctx.reply(`❌ Error: ${e.message}`);
     }
 });
 
-// ─── MANEJAR CANCELAR ───
+// ─── SELECCIÓN DE CALIDAD ───
+bot.action(/q_(.+)_(.+)_(.+)_(.+)_(.+)/, async (ctx) => {
+    try {
+        const match = ctx.match;
+        const fileId = match[1];
+        const quality = match[2];
+        const width = match[3];
+        const height = match[4];
+        const size = parseInt(match[5]);
+        
+        await ctx.answerCbQuery(`✅ ${quality}`);
+        await ctx.deleteMessage();
+        
+        await ctx.reply(`✅ ${quality} - ${formatSize(size)}`);
+        await processFile(ctx, fileId, `video_${fileId}.mp4`, '.mp4', {
+            quality: quality,
+            resolution: `${width}x${height}`,
+            size: size
+        });
+        
+    } catch (e) {
+        console.error('Error:', e);
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
 bot.action('cancel', async (ctx) => {
     await ctx.answerCbQuery('❌ Cancelado');
     await ctx.deleteMessage();
-    await ctx.reply('❌ Proceso cancelado');
+    await ctx.reply('❌ Cancelado');
 });
 
-// ─── MANEJAR DOCUMENTOS ───
+// ─── DOCUMENTOS ───
 bot.on('document', async (ctx) => {
     try {
         const doc = ctx.message.document;
@@ -334,11 +264,11 @@ bot.on('document', async (ctx) => {
             size: doc.file_size || 0
         });
     } catch (e) {
-        await ctx.reply(`❌ Error: ${e.message}`);
+        await ctx.reply(`❌ ${e.message}`);
     }
 });
 
-// ─── MANEJAR FOTOS ───
+// ─── FOTOS ───
 bot.on('photo', async (ctx) => {
     try {
         const photos = ctx.message.photo;
@@ -348,11 +278,11 @@ bot.on('photo', async (ctx) => {
             size: photo.file_size || 0
         });
     } catch (e) {
-        await ctx.reply(`❌ Error: ${e.message}`);
+        await ctx.reply(`❌ ${e.message}`);
     }
 });
 
-// ─── MANEJAR AUDIOS ───
+// ─── AUDIOS ───
 bot.on('audio', async (ctx) => {
     try {
         const audio = ctx.message.audio;
@@ -361,29 +291,23 @@ bot.on('audio', async (ctx) => {
             size: audio.file_size || 0
         });
     } catch (e) {
-        await ctx.reply(`❌ Error: ${e.message}`);
+        await ctx.reply(`❌ ${e.message}`);
     }
 });
 
-// ─── SERVIDOR WEB ───
+// ─── SERVIDOR ───
 const app = express();
-app.get('/', (req, res) => res.json({ 
-    status: 'online', 
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-}));
+app.get('/', (req, res) => res.json({ status: 'online', uptime: process.uptime() }));
 app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🌐 Web en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🌐 Web en ${PORT}`));
 
 // ─── KEEP ALIVE ───
 setInterval(() => {
     axios.get(`https://s3-uploader-eplj.onrender.com/health`).catch(() => {});
 }, 300000);
 
-// ─── INICIAR BOT ───
 bot.launch();
-console.log('🤖 Bot Puente ToDus iniciado correctamente');
-console.log('🎬 Modo: Selección interactiva de calidad de video');
-console.log('⚡ Usando URL directa de Telegram (sin getFile)');
+console.log('🤖 Bot iniciado');
+console.log('✅ Usando getFileLink() para archivos grandes');
