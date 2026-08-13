@@ -1,8 +1,8 @@
-FROM python:3.11-slim
-RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+FROM node:20-slim
 WORKDIR /app
-COPY . .
+COPY package*.json ./
+RUN npm install --production
+COPY index.js .
+RUN mkdir -p /tmp/todus_uploads
 EXPOSE 10000
-CMD ["bash", "start.sh"]
+CMD ["node", "index.js"]

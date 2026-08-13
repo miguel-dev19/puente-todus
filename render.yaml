@@ -3,3 +3,4 @@ services:
     name: puente-todus
     env: docker
     plan: free
+    healthCheckPath: /health
