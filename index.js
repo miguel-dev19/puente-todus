@@ -1,4 +1,4 @@
-const { Bot } = require('grammy');
+const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const express = require('express');
 const fs = require('fs-extra');
@@ -12,7 +12,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 fs.ensureDirSync(DOWNLOAD_PATH);
 
-const bot = new Bot(BOT_TOKEN);
+const bot = new Telegraf(BOT_TOKEN);
 
 function formatSize(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -27,88 +27,83 @@ function progressBar(pct) {
     return '⬢'.repeat(f) + '⬡'.repeat(w - f);
 }
 
-function getVideoQuality(video) {
-    const width = video.width || 0;
-    const height = video.height || 0;
-    const duration = video.duration || 0;
-    const fileSize = video.file_size || 0;
+// ─── OBTENER TODAS LAS CALIDADES DE VIDEO ───
+function getAllVideoQualities(videoData) {
+    const qualities = [];
     
-    let quality = 'SD';
-    if (width >= 3840) quality = '8K';
-    else if (width >= 2560) quality = '4K';
-    else if (width >= 1920) quality = '1080p';
-    else if (width >= 1280) quality = '720p';
-    else if (width >= 854) quality = '480p';
-    else if (width >= 640) quality = '360p';
-    else quality = 'SD';
+    // 1. Calidad principal
+    if (videoData.document) {
+        const attr = videoData.document.attributes.find(a => a._ === 'DocumentAttributeVideo');
+        qualities.push({
+            file_id: videoData.document.id,
+            access_hash: videoData.document.access_hash,
+            size: videoData.document.size,
+            width: attr?.w || 0,
+            height: attr?.h || 0,
+            quality: `${attr?.w || 0}p`,
+            is_main: true,
+            mime_type: videoData.document.mime_type,
+            label: `📹 ${attr?.w || 0}p (principal)`
+        });
+    }
     
-    return {
-        quality,
-        width,
-        height,
-        duration,
-        fileSize,
-        resolution: `${width}x${height}`
-    };
+    // 2. Calidades alternativas
+    if (videoData.alt_documents) {
+        for (const doc of videoData.alt_documents) {
+            const attr = doc.attributes.find(a => a._ === 'DocumentAttributeVideo');
+            if (attr && doc.mime_type === 'video/mp4') {
+                // Detectar codec
+                let codec = '';
+                if (doc.attributes.some(a => a.video_codec === 'av01')) codec = 'AV1';
+                else if (doc.attributes.some(a => a.video_codec === 'h264')) codec = 'H264';
+                
+                qualities.push({
+                    file_id: doc.id,
+                    access_hash: doc.access_hash,
+                    size: doc.size,
+                    width: attr.w || 0,
+                    height: attr.h || 0,
+                    quality: `${attr.w || 0}p`,
+                    is_main: false,
+                    mime_type: doc.mime_type,
+                    codec: codec,
+                    label: `📹 ${attr.w || 0}p${codec ? ` (${codec})` : ''}`
+                });
+            }
+        }
+    }
+    
+    // Ordenar por tamaño (menor a mayor)
+    qualities.sort((a, b) => a.size - b.size);
+    
+    return qualities;
 }
 
-// ─── NUEVA FUNCIÓN: OBTENER MENOR RESOLUCIÓN ───
-function getLowestQuality(video) {
-    // Obtener la menor resolución disponible
-    // Telegram no permite seleccionar entre calidades directamente
-    // Pero podemos identificar la calidad más baja basada en el tamaño y resolución
-    
-    const width = video.width || 0;
-    const height = video.height || 0;
-    
-    // Determinar la calidad más baja disponible
-    let quality = 'SD';
-    if (width <= 640) quality = '360p';
-    else if (width <= 854) quality = '480p';
-    else if (width <= 1280) quality = '720p';
-    else if (width <= 1920) quality = '1080p';
-    else if (width <= 2560) quality = '4K';
-    else quality = '8K';
-    
-    return {
-        quality: `Mínima (${quality})`,
-        width,
-        height,
-        resolution: `${width}x${height}`
-    };
-}
-
-bot.command('start', async (ctx) => {
+bot.start(async (ctx) => {
     await ctx.reply(
         `👋 ¡Hola! Bienvenido a Puente ToDus\n\n` +
-        `📤 Envíame cualquier archivo y lo subiré automáticamente a ToDus S3.\n\n` +
-        `📎 Puedes enviarme:\n` +
-        `• Documentos (PDF, Word, Excel, etc.)\n` +
-        `• Imágenes (JPG, PNG, GIF)\n` +
-        `• Videos (MP4, AVI, MOV) - Se usa la menor resolución por defecto\n` +
-        `• Audios (MP3, WAV, OGG)\n\n` +
-        `📦 Límite por archivo: 50 MB\n` +
-        `⏱️ Te mostraré el progreso de subida en tiempo real\n\n` +
-        `🚀 ¡Envía tu primer archivo ahora mismo!`
+        `📤 Envíame un video y podrás elegir la calidad\n` +
+        `📎 También acepto: documentos, fotos, audios\n` +
+        `📦 Límite: 50 MB\n\n` +
+        `🚀 ¡Envía tu archivo!`
     );
 });
 
-// Función para procesar cualquier tipo de archivo
-async function processFile(ctx, file, filename, ext, fileInfo = {}) {
-    // Validar tamaño
-    if (file.file_size && file.file_size > MAX_FILE_SIZE) {
-        await ctx.reply(
-            `❌ Archivo demasiado grande\n\n` +
-            `📏 Tamaño: ${formatSize(file.file_size)}\n` +
-            `📦 Límite: ${formatSize(MAX_FILE_SIZE)}\n\n` +
-            `💡 Por favor, envía un archivo más pequeño.`
-        );
-        return;
-    }
-
-    const status = await ctx.reply("⏳ Procesando tu archivo...");
-
+// ─── PROCESAR ARCHIVO ───
+async function processFile(ctx, fileId, filename, ext, fileInfo = {}) {
     try {
+        const file = await ctx.telegram.getFile(fileId);
+        
+        if (file.file_size && file.file_size > MAX_FILE_SIZE) {
+            await ctx.reply(
+                `❌ Archivo demasiado grande\n` +
+                `📏 ${formatSize(file.file_size)} > ${formatSize(MAX_FILE_SIZE)}`
+            );
+            return;
+        }
+
+        const status = await ctx.reply("⏳ Procesando...");
+
         const tempPath = path.join(DOWNLOAD_PATH, `${crypto.randomBytes(8).toString('hex')}${ext}`);
         const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
 
@@ -121,7 +116,7 @@ async function processFile(ctx, file, filename, ext, fileInfo = {}) {
 
         const totalSize = Number(response.headers['content-length']) || 0;
         let downloaded = 0;
-        let lastDlPct = -10;
+        let lastPct = -10;
 
         const writer = fs.createWriteStream(tempPath);
 
@@ -129,14 +124,17 @@ async function processFile(ctx, file, filename, ext, fileInfo = {}) {
             downloaded += chunk.length;
             if (totalSize > 0) {
                 const pct = Math.floor((downloaded / totalSize) * 100);
-                if (pct - lastDlPct >= 10 || pct === 100) {
-                    lastDlPct = pct;
-                    const qualityInfo = fileInfo.quality ? ` (${fileInfo.quality})` : '';
-                    ctx.api.editMessageText(ctx.chat.id, status.message_id,
-                        `📥 DESCARGANDO${qualityInfo}\n` +
+                if (pct - lastPct >= 10 || pct === 100) {
+                    lastPct = pct;
+                    const quality = fileInfo.quality ? ` (${fileInfo.quality})` : '';
+                    ctx.telegram.editMessageText(
+                        ctx.chat.id,
+                        status.message_id,
+                        null,
+                        `📥 DESCARGANDO${quality}\n` +
                         `┠ [${progressBar(pct)}]\n` +
-                        `┠ Progreso: ${pct}%\n` +
-                        `┖ Tamaño: ${formatSize(downloaded)}/${formatSize(totalSize)}`
+                        `┠ ${pct}%\n` +
+                        `┖ ${formatSize(downloaded)}/${formatSize(totalSize)}`
                     ).catch(() => {});
                 }
             }
@@ -154,21 +152,24 @@ async function processFile(ctx, file, filename, ext, fileInfo = {}) {
         const uploadUrl = `${S3}/${remote}`;
 
         let uploaded = 0;
-        let lastUlPct = -10;
+        lastPct = -10;
 
-        const fileStream = fs.createReadStream(tempPath, { highWaterMark: 2048 * 1024 });
+        const fileStream = fs.createReadStream(tempPath, { highWaterMark: 1024 * 1024 });
 
         fileStream.on('data', (chunk) => {
             uploaded += chunk.length;
             const pct = Math.floor((uploaded / size) * 100);
-            if (pct - lastUlPct >= 10 || pct === 100) {
-                lastUlPct = pct;
-                const qualityInfo = fileInfo.quality ? ` (${fileInfo.quality})` : '';
-                ctx.api.editMessageText(ctx.chat.id, status.message_id,
-                    `📤 SUBIENDO A TODUS${qualityInfo}\n` +
+            if (pct - lastPct >= 10 || pct === 100) {
+                lastPct = pct;
+                const quality = fileInfo.quality ? ` (${fileInfo.quality})` : '';
+                ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    status.message_id,
+                    null,
+                    `📤 SUBIENDO${quality}\n` +
                     `┠ [${progressBar(pct)}]\n` +
-                    `┠ Progreso: ${pct}%\n` +
-                    `┖ Tamaño: ${formatSize(uploaded)}/${formatSize(size)}`
+                    `┠ ${pct}%\n` +
+                    `┖ ${formatSize(uploaded)}/${formatSize(size)}`
                 ).catch(() => {});
             }
         });
@@ -179,155 +180,188 @@ async function processFile(ctx, file, filename, ext, fileInfo = {}) {
         });
 
         const name = path.basename(filename, ext).replace(/_/g, ' ');
+        let msg = `✅ ¡Subido!\n\n📄 ${name}\n📦 ${formatSize(size)}\n🔗 ${uploadUrl}`;
         
-        let responseMessage = 
-            `✅ ¡Archivo subido con éxito!\n\n` +
-            `📄 Nombre: ${name}\n` +
-            `🔖 Extensión: ${ext.replace('.', '')}\n` +
-            `📦 Tamaño: ${formatSize(size)}\n`;
-            
         if (fileInfo.quality) {
-            responseMessage += 
-                `🎬 Calidad: ${fileInfo.quality}\n` +
-                `📐 Resolución: ${fileInfo.resolution}\n` +
-                `⚡ Modo: Resolución mínima (optimizado para velocidad)\n`;
+            msg += `\n🎬 ${fileInfo.quality} (${fileInfo.resolution})`;
         }
-        
-        responseMessage += 
-            `🔗 URL: ${uploadUrl}\n\n` +
-            `📋 ¡El enlace ya está listo para compartir!`;
 
-        await ctx.api.editMessageText(ctx.chat.id, status.message_id, responseMessage);
-
+        await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, null, msg);
         fs.removeSync(tempPath);
 
     } catch (e) {
-        await ctx.api.editMessageText(ctx.chat.id, status.message_id,
-            `❌ Error al procesar el archivo\n\n` +
-            `📝 ${e.message.slice(0, 200)}\n\n` +
-            `💡 Intenta de nuevo o envía un archivo más pequeño.`
-        );
+        console.error('Error:', e);
+        await ctx.reply(`❌ Error: ${e.message.slice(0, 150)}`);
     }
 }
 
-bot.on('message', async (ctx) => {
-    const msg = ctx.message;
-    
-    // --- MANEJAR VIDEO (CON MENOR RESOLUCIÓN) ---
-    if (msg.video) {
-        try {
-            // Obtener información de calidad mínima
-            const videoInfo = getLowestQuality(msg.video);
-            const file = await ctx.getFile();
-            
-            // Mostrar información del video con resolución mínima
-            await ctx.reply(
-                `🎬 Video detectado\n\n` +
-                `📐 Calidad seleccionada: ${videoInfo.quality}\n` +
-                `📏 Resolución: ${videoInfo.resolution}\n` +
-                `📦 Tamaño original: ${formatSize(msg.video.file_size || 0)}\n\n` +
-                `⚡ Optimizando para velocidad...\n` +
-                `⏳ Iniciando procesamiento...`
-            );
+// ─── MANEJAR VIDEOS CON BOTONES ───
+bot.on('video', async (ctx) => {
+    try {
+        const videoData = ctx.message.video;
+        
+        // Obtener todas las calidades
+        const qualities = getAllVideoQualities(videoData);
+        
+        if (qualities.length === 0) {
+            await ctx.reply('❌ No se pudo procesar el video');
+            return;
+        }
+        
+        // Si solo hay una calidad, procesar directamente
+        if (qualities.length === 1) {
+            const q = qualities[0];
+            await ctx.reply(`🎬 Video detectado\n📹 ${q.quality}\n📦 ${formatSize(q.size)}\n\n⏳ Procesando...`);
             
             await processFile(
-                ctx, 
-                file, 
-                `video_${msg.video.file_id}.mp4`, 
-                '.mp4', 
-                videoInfo
+                ctx,
+                q.file_id,
+                `video_${q.file_id}.mp4`,
+                '.mp4',
+                {
+                    quality: q.quality,
+                    resolution: `${q.width}x${q.height}`,
+                    size: q.size
+                }
             );
             return;
-        } catch (error) {
-            console.error('Error procesando video:', error);
-            await ctx.reply(`❌ Error al procesar el video: ${error.message}`);
-            return;
         }
-    }
-    
-    // --- MANEJAR DOCUMENTO ---
-    if (msg.document) {
-        try {
-            const file = await ctx.getFile();
-            const filename = msg.document.file_name || `doc_${msg.document.file_id}`;
-            const ext = path.extname(filename) || '.bin';
-            await processFile(ctx, file, filename, ext, { type: 'document' });
-            return;
-        } catch (error) {
-            console.error('Error procesando documento:', error);
-            await ctx.reply(`❌ Error al procesar el documento: ${error.message}`);
-            return;
+        
+        // ─── MÚLTIPLES CALIDADES: MOSTRAR BOTONES ───
+        const buttons = [];
+        
+        for (const q of qualities) {
+            // Determinar emoji según calidad
+            let emoji = '📹';
+            if (q.quality.includes('720')) emoji = '🎬';
+            else if (q.quality.includes('480')) emoji = '📱';
+            else if (q.quality.includes('360')) emoji = '📱';
+            
+            const label = `${emoji} ${q.quality} (${formatSize(q.size)})`;
+            const callbackData = `quality_${q.file_id}_${q.access_hash}_${q.quality}_${q.width}x${q.height}`;
+            
+            buttons.push([{ text: label, callback_data: callbackData }]);
         }
-    }
-    
-    // --- MANEJAR FOTO ---
-    if (msg.photo) {
-        try {
-            const file = await ctx.getFile();
-            const filename = `photo_${msg.photo[msg.photo.length-1].file_id}.jpg`;
-            await processFile(ctx, file, filename, '.jpg', { type: 'photo' });
-            return;
-        } catch (error) {
-            console.error('Error procesando foto:', error);
-            await ctx.reply(`❌ Error al procesar la foto: ${error.message}`);
-            return;
-        }
-    }
-    
-    // --- MANEJAR AUDIO ---
-    if (msg.audio) {
-        try {
-            const file = await ctx.getFile();
-            const filename = `audio_${msg.audio.file_id}.mp3`;
-            await processFile(ctx, file, filename, '.mp3', { type: 'audio' });
-            return;
-        } catch (error) {
-            console.error('Error procesando audio:', error);
-            await ctx.reply(`❌ Error al procesar el audio: ${error.message}`);
-            return;
-        }
-    }
-    
-    // --- MANEJAR VIDEO NOTE ---
-    if (msg.video_note) {
-        try {
-            const file = await ctx.getFile();
-            const filename = `videonote_${msg.video_note.file_id}.mp4`;
-            await ctx.reply(`🎥 Nota de video detectada. Procesando...`);
-            await processFile(ctx, file, filename, '.mp4', { type: 'video_note' });
-            return;
-        } catch (error) {
-            console.error('Error procesando nota de video:', error);
-            await ctx.reply(`❌ Error al procesar la nota de video: ${error.message}`);
-            return;
-        }
-    }
-    
-    // Si el mensaje no contiene ningún archivo soportado
-    if (!msg.video && !msg.document && !msg.photo && !msg.audio && !msg.video_note) {
-        return;
+        
+        // Botón para cancelar
+        buttons.push([{ text: '❌ Cancelar', callback_data: 'cancel' }]);
+        
+        await ctx.reply(
+            `🎬 Video con múltiples calidades\n\n` +
+            `📊 Selecciona la calidad que deseas subir:\n` +
+            `⚡ Recomendado: la más ligera (arriba)`,
+            {
+                reply_markup: {
+                    inline_keyboard: buttons
+                }
+            }
+        );
+        
+    } catch (e) {
+        console.error('Error en video:', e);
+        await ctx.reply(`❌ Error al procesar el video: ${e.message}`);
     }
 });
 
+// ─── MANEJAR SELECCIÓN DE CALIDAD ───
+bot.action(/quality_(.+)_(.+)_(.+)_(.+)x(.+)/, async (ctx) => {
+    try {
+        const match = ctx.match;
+        const fileId = match[1];
+        const accessHash = match[2];
+        const quality = match[3];
+        const width = match[4];
+        const height = match[5];
+        
+        // Responder al callback (quita el loading)
+        await ctx.answerCbQuery(`✅ Seleccionada calidad ${quality}`);
+        
+        // Eliminar los botones
+        await ctx.deleteMessage();
+        
+        // Informar al usuario
+        await ctx.reply(
+            `✅ Calidad seleccionada: ${quality}\n` +
+            `📐 Resolución: ${width}x${height}\n` +
+            `⏳ Iniciando procesamiento...`
+        );
+        
+        // Procesar el archivo
+        await processFile(
+            ctx,
+            fileId,
+            `video_${fileId}.mp4`,
+            '.mp4',
+            {
+                quality: quality,
+                resolution: `${width}x${height}`
+            }
+        );
+        
+    } catch (e) {
+        console.error('Error en acción:', e);
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// ─── MANEJAR CANCELAR ───
+bot.action('cancel', async (ctx) => {
+    await ctx.answerCbQuery('❌ Cancelado');
+    await ctx.deleteMessage();
+    await ctx.reply('❌ Proceso cancelado');
+});
+
+// ─── MANEJAR DOCUMENTOS ───
+bot.on('document', async (ctx) => {
+    try {
+        const doc = ctx.message.document;
+        const filename = doc.file_name || `doc_${doc.file_id}`;
+        const ext = path.extname(filename) || '.bin';
+        await processFile(ctx, doc.file_id, filename, ext, { type: 'documento' });
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// ─── MANEJAR FOTOS ───
+bot.on('photo', async (ctx) => {
+    try {
+        const photos = ctx.message.photo;
+        const photo = photos[photos.length - 1];
+        await processFile(ctx, photo.file_id, `photo_${photo.file_id}.jpg`, '.jpg', { type: 'foto' });
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// ─── MANEJAR AUDIOS ───
+bot.on('audio', async (ctx) => {
+    try {
+        const audio = ctx.message.audio;
+        await processFile(ctx, audio.file_id, `audio_${audio.file_id}.mp3`, '.mp3', { type: 'audio' });
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
+});
+
+// ─── SERVIDOR WEB ───
 const app = express();
-app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        uptime: process.uptime(),
-        memory: process.memoryUsage().rss,
-        timestamp: new Date().toISOString()
-    });
-});
+app.get('/', (req, res) => res.json({ 
+    status: 'online', 
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+}));
+app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'healthy' });
-});
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🌐 Web en puerto ${PORT}`));
 
-app.listen(10000, () => console.log('Web on 10000'));
-
+// ─── KEEP ALIVE ───
 setInterval(() => {
-    axios.get('https://s3-uploader-eplj.onrender.com/health', { timeout: 10000 }).catch(() => {});
+    axios.get(`https://s3-uploader-eplj.onrender.com/health`).catch(() => {});
 }, 300000);
 
-bot.start();
+// ─── INICIAR BOT ───
+bot.launch();
 console.log('🤖 Bot Puente ToDus iniciado correctamente');
+console.log('🎬 Modo: Selección interactiva de calidad de video');
